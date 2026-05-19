@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>AGA — Ayarza Garre Autos</title>
+<?!= include('CSS') ?>
+</head>
+<body>
+<script>const USER=<?= JSON.stringify(userInfo) ?>;</script>
+<div id="app">
+
+<nav id="navbar">
+  <div class="nav-left">
+    <button class="hamburger" onclick="toggleMenu()"><span></span><span></span><span></span></button>
+    <div class="nav-brand">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 17H3a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11a2 2 0 0 1 2 2v3"/><rect x="9" y="11" width="14" height="10" rx="1"/><circle cx="12" cy="21" r="1"/><circle cx="20" cy="21" r="1"/></svg>
+      AGA
+    </div>
+  </div>
+  <div class="nav-links" id="navLinks">
+    <button class="nav-link active" onclick="navigate('dashboard')"  data-page="dashboard">Dashboard</button>
+    <button class="nav-link"        onclick="navigate('inventario')" data-page="inventario">Inventario</button>
+    <? if(userInfo.role==='admin'){ ?>
+    <button class="nav-link"        onclick="navigate('caja')"       data-page="caja">Caja</button>
+    <? } ?>
+    <? if(userInfo.role!=='vendedor'){ ?>
+    <button class="nav-link"        onclick="navigate('reportes')"   data-page="reportes">Reportes</button>
+    <? } ?>
+    <button class="nav-link"        onclick="navigate('personas')"   data-page="personas">Contactos</button>
+    <button class="nav-link"        onclick="navigate('config')"     data-page="config">⚙️</button>
+  </div>
+  <div class="nav-right">
+    <div class="tc-pill" id="tc-pill">$ <span id="tc-val">—</span></div>
+    <span class="role-badge role-<?= userInfo.role ?>"><?= userInfo.role ?></span>
+  </div>
+</nav>
+
+<main id="main">
+
+<!-- ══ DASHBOARD ══ -->
+<section id="page-dashboard" class="page active">
+  <div class="page-header">
+    <div><h1 id="dash-mes">Dashboard</h1><p class="sub">Resumen operativo</p></div>
+    <button class="btn-primary" onclick="navigate('caja');setTimeout(()=>abrirWizard(),100)">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+      Nuevo movimiento
+    </button>
+  </div>
+  <div class="kpi-grid" id="kpi-grid">
+    <div class="kpi-card skeleton"></div><div class="kpi-card skeleton"></div>
+    <div class="kpi-card skeleton"></div><div class="kpi-card skeleton"></div>
+  </div>
+  <div id="alertas-wrap"></div><div id="ventas-wrap"></div>
+</section>
+
+<!-- ══ INVENTARIO ══ -->
+<section id="page-inventario" class="page">
+  <div class="page-header">
+    <div><h1>Inventario</h1><p class="sub" id="inv-sub">Vehículos activos</p></div>
+    <? if(userInfo.role==='admin'){ ?>
+    <button class="btn-primary" onclick="navigate('caja');setTimeout(()=>abrirWizard('egreso','compra_auto'),150)">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+      Registrar auto
+    </button>
+    <? } ?>
+  </div>
+  <div class="filter-tabs">
+    <button class="ftab active" onclick="filtrarInv(this,'activos')">Activos</button>
+    <button class="ftab"        onclick="filtrarInv(this,'stock')">Stock</button>
+    <button class="ftab"        onclick="filtrarInv(this,'reservado')">Reservado</button>
+    <button class="ftab"        onclick="filtrarInv(this,'consigna')">Consigna</button>
+    <button class="ftab"        onclick="filtrarInv(this,'vendidos')">Vendidos</button>
+  </div>
+  <div class="search-bar">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+    <input type="text" id="inv-search" placeholder="Buscar dominio, marca, modelo o ex dueño..." oninput="filtrarTabla()">
+  </div>
+  <div class="table-wrap">
+    <table class="data-table">
+      <thead><tr><th>Dominio</th><th>Vehículo</th><th>Tipo</th><th>Estado</th><th class="num">Costo</th><th class="num">Días</th><th></th></tr></thead>
+      <tbody id="inv-tbody"><tr><td colspan="7" class="empty-row">Cargando...</td></tr></tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ══ CAJA ══ -->
+<section id="page-caja" class="page">
+  <div class="page-header" style="flex-wrap:wrap;gap:12px">
+    <div style="flex:1;min-width:200px">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:4px">
+        <h1>Caja</h1>
+        <div class="entidad-toggle">
+          <button class="etog active aga"  id="etog-AGA"    onclick="setEntidad('AGA')">AGA</button>
+          <button class="etog martin"      id="etog-Martin" onclick="setEntidad('Martin')">Martín</button>
+        </div>
+      </div>
+      <div class="subcaja-bar" id="subcaja-bar">
+        <div class="subcaja-item"><span>💵 ARS</span><strong id="bal-ars">—</strong></div>
+        <div class="subcaja-sep">·</div>
+        <div class="subcaja-item"><span>💰 USD</span><strong id="bal-usd">—</strong><small id="bal-usd-ars"></small></div>
+        <div class="subcaja-sep">·</div>
+        <div class="subcaja-item"><span>📋 Cheques</span><strong id="bal-chq">—</strong></div>
+        <div class="subcaja-sep">·</div>
+        <div class="subcaja-item total"><span>Total</span><strong id="bal-total">—</strong></div>
+      </div>
+    </div>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <select class="field" id="caja-mes" onchange="recargarCajaActual()" style="width:auto;padding:8px 10px;font-size:13px"></select>
+      <button class="btn-primary" onclick="abrirWizard()">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        Nuevo movimiento
+      </button>
+    </div>
+  </div>
+  <div class="inner-tabs">
+    <button class="itab active" onclick="switchCajaTab(this,'general')">General</button>
+    <button class="itab"        onclick="switchCajaTab(this,'ars')">ARS</button>
+    <button class="itab"        onclick="switchCajaTab(this,'dolares')">Dólares</button>
+    <button class="itab"        onclick="switchCajaTab(this,'cheques')">Cheques</button>
+    <button class="itab"        onclick="switchCajaTab(this,'gastos')">Gastos</button>
+  </div>
+  <!-- General -->
+  <div id="itab-general" class="itab-content active">
+    <div class="table-wrap"><table class="data-table">
+      <thead><tr><th>Fecha</th><th>Detalle</th><th>Concepto</th><th>Caja</th>
+        <th class="num income-col">Ingreso</th><th class="num expense-col">Egreso</th>
+        <th class="num">Saldo</th><th></th></tr></thead>
+      <tbody id="caja-tbody-general"><tr><td colspan="8" class="empty-row">Cargando...</td></tr></tbody>
+    </table></div>
+  </div>
+  <!-- ARS -->
+  <div id="itab-ars" class="itab-content">
+    <div class="table-wrap"><table class="data-table">
+      <thead><tr><th>Fecha</th><th>Detalle</th><th>Concepto</th><th>Entidad</th>
+        <th class="num income-col">Ingreso ARS</th><th class="num expense-col">Egreso ARS</th>
+        <th class="num">Saldo ARS</th><th></th></tr></thead>
+      <tbody id="caja-tbody-ars"><tr><td colspan="8" class="empty-row">Cargando...</td></tr></tbody>
+    </table></div>
+  </div>
+  <!-- Dólares -->
+  <div id="itab-dolares" class="itab-content">
+    <div class="table-wrap"><table class="data-table">
+      <thead><tr><th>Fecha</th><th>Tipo</th><th class="num">USD</th><th class="num">TC</th>
+        <th class="num">ARS equiv.</th><th>Contraparte</th><th></th></tr></thead>
+      <tbody id="dolares-tbody"><tr><td colspan="7" class="empty-row">Cargando...</td></tr></tbody>
+    </table></div>
+  </div>
+  <!-- Cheques -->
+  <div id="itab-cheques" class="itab-content">
+    <div class="filter-tabs" style="margin-top:4px">
+      <button class="ftab active" onclick="filtrarCheques(this,'')">Todos</button>
+      <button class="ftab" onclick="filtrarCheques(this,'en_cartera')">En cartera</button>
+      <button class="ftab" onclick="filtrarCheques(this,'depositados')">Cobrados</button>
+      <button class="ftab" onclick="filtrarCheques(this,'propios')">Propios</button>
+    </div>
+    <div class="table-wrap"><table class="data-table">
+      <thead><tr><th>Número</th><th>Tipo</th><th>Banco</th><th>Librador</th>
+        <th class="num">Importe</th><th>Vencimiento</th><th>Cobrado</th><th>Estado</th><th></th></tr></thead>
+      <tbody id="cheques-tbody"><tr><td colspan="9" class="empty-row">Cargando...</td></tr></tbody>
+    </table></div>
+  </div>
+  <!-- Gastos -->
+  <div id="itab-gastos" class="itab-content">
+    <div class="table-wrap"><table class="data-table">
+      <thead><tr><th>Fecha</th><th>Categoría</th><th>Proveedor</th><th>Descripción</th>
+        <th>Tipo</th><th class="num">Neto</th><th class="num">IVA</th><th class="num">Total</th><th></th></tr></thead>
+      <tbody id="gastos-tbody"><tr><td colspan="9" class="empty-row">Cargando...</td></tr></tbody>
+    </table></div>
+  </div>
+</section>
+
+<!-- ══ REPORTES ══ -->
+<section id="page-reportes" class="page">
+  <div class="page-header">
+    <div><h1>Estado de Resultados</h1><p class="sub" id="reporte-periodo-lbl">Seleccioná el período</p></div>
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <select class="field" id="rep-mes" style="width:auto;padding:8px 10px;font-size:13px" onchange="_reporteLoaded=null">
+        <option value="1">Enero</option><option value="2">Febrero</option><option value="3">Marzo</option>
+        <option value="4">Abril</option><option value="5">Mayo</option><option value="6">Junio</option>
+        <option value="7">Julio</option><option value="8">Agosto</option><option value="9">Septiembre</option>
+        <option value="10">Octubre</option><option value="11">Noviembre</option><option value="12">Diciembre</option>
+      </select>
+      <select class="field" id="rep-anio" style="width:auto;padding:8px 10px;font-size:13px" onchange="_reporteLoaded=null">
+        <option>2026</option><option>2025</option><option>2024</option>
+      </select>
+      <button class="btn-primary" onclick="recargarReporte()">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+        Generar
+      </button>
+    </div>
+  </div>
+  <div id="rep-body">
+    <div class="coming-soon"><p>Seleccioná el mes y presioná Generar</p></div>
+  </div>
+</section>
+
+<!-- ══ PERSONAS ══ -->
+<section id="page-personas" class="page">
+  <div class="page-header">
+    <div><h1>Contactos</h1><p class="sub" id="personas-sub">Compradores, vendedores y proveedores</p></div>
+    <button class="btn-primary" onclick="abrirNuevaPersona()">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+      Nuevo contacto
+    </button>
+  </div>
+  <div class="filter-tabs">
+    <button class="ftab active" onclick="filtrarPersonas(this,'todos')">Todos</button>
+    <button class="ftab"        onclick="filtrarPersonas(this,'Comprador')">Compradores</button>
+    <button class="ftab"        onclick="filtrarPersonas(this,'Vendedor')">Vendedores</button>
+    <button class="ftab"        onclick="filtrarPersonas(this,'Proveedor')">Proveedores</button>
+  </div>
+  <div class="search-bar">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+    <input type="text" id="personas-search" placeholder="Buscar por nombre, teléfono o email..." oninput="filtrarPersonasTabla()">
+  </div>
+  <div class="table-wrap">
+    <table class="data-table">
+      <thead><tr><th>Nombre</th><th>Tipo</th><th>Teléfono</th><th>DNI</th><th>Email</th><th></th></tr></thead>
+      <tbody id="personas-tbody"><tr><td colspan="6" class="empty-row">Cargando...</td></tr></tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ══ CONFIG ══ -->
+<section id="page-config" class="page">
+  <div class="page-header">
+    <div><h1>Configuración</h1><p class="sub">Personalización de la interfaz</p></div>
+    <button class="btn-primary" onclick="guardarConfig()">Guardar cambios</button>
+  </div>
+  <div class="config-grid">
+    <div class="config-card">
+      <h3 class="config-section-title">🎨 Tema de colores</h3>
+      <div class="theme-presets">
+        <button class="preset-btn active" data-accent="#4361ee" data-brand="#1a1a2e" onclick="applyPreset(this)"><span style="background:#4361ee"></span>Azul (default)</button>
+        <button class="preset-btn" data-accent="#059669" data-brand="#064e3b" onclick="applyPreset(this)"><span style="background:#059669"></span>Verde</button>
+        <button class="preset-btn" data-accent="#dc2626" data-brand="#1c0f0f" onclick="applyPreset(this)"><span style="background:#dc2626"></span>Rojo</button>
+        <button class="preset-btn" data-accent="#d97706" data-brand="#1c1408" onclick="applyPreset(this)"><span style="background:#d97706"></span>Ámbar</button>
+        <button class="preset-btn" data-accent="#7c3aed" data-brand="#1e1030" onclick="applyPreset(this)"><span style="background:#7c3aed"></span>Violeta</button>
+      </div>
+      <div class="form-row" style="margin-top:14px">
+        <div class="form-group"><label class="lbl">Color de acento</label><input type="color" id="cfg-accent" value="#4361ee" oninput="previewColor(this.value)" class="color-picker"></div>
+        <div class="form-group"><label class="lbl">Color de navbar</label><input type="color" id="cfg-brand" value="#1a1a2e" oninput="previewBrand(this.value)" class="color-picker"></div>
+      </div>
+    </div>
+    <div class="config-card">
+      <h3 class="config-section-title">📝 Tipografía</h3>
+      <div class="form-group"><label class="lbl">Tamaño de fuente</label>
+        <div class="font-size-ctrl"><button onclick="changeFontSize(-1)">A−</button><span id="font-size-val">14px</span><button onclick="changeFontSize(1)">A+</button></div>
+      </div>
+      <div class="form-group"><label class="lbl">Fuente</label>
+        <select class="field" id="cfg-font" onchange="applyFont(this.value)">
+          <option value="'Google Sans',-apple-system,sans-serif">Google Sans (default)</option>
+          <option value="'Inter',sans-serif">Inter</option>
+          <option value="'Roboto',sans-serif">Roboto</option>
+          <option value="'Arial',sans-serif">Arial</option>
+        </select>
+      </div>
+      <div class="form-group"><label class="lbl">Bordes</label>
+        <select class="field" id="cfg-radius" onchange="applyRadius(this.value)">
+          <option value="12">Redondeados (default)</option>
+          <option value="6">Suaves</option>
+          <option value="0">Cuadrados</option>
+        </select>
+      </div>
+    </div>
+    <div class="config-card">
+      <h3 class="config-section-title">📋 Columnas — Inventario</h3>
+      <div class="col-toggles">
+        <label class="col-toggle"><input type="checkbox" data-table="inv" data-col="dominio" checked><span>Dominio</span></label>
+        <label class="col-toggle"><input type="checkbox" data-table="inv" data-col="vehiculo" checked><span>Vehículo</span></label>
+        <label class="col-toggle"><input type="checkbox" data-table="inv" data-col="tipo" checked><span>Tipo</span></label>
+        <label class="col-toggle"><input type="checkbox" data-table="inv" data-col="estado" checked><span>Estado</span></label>
+        <label class="col-toggle"><input type="checkbox" data-table="inv" data-col="costo" checked><span>Costo total</span></label>
+        <label class="col-toggle"><input type="checkbox" data-table="inv" data-col="dias" checked><span>Días en stock</span></label>
+      </div>
+    </div>
+    <div class="config-card">
+      <h3 class="config-section-title">📋 Columnas — Caja</h3>
+      <div class="col-toggles">
+        <label class="col-toggle"><input type="checkbox" data-table="caja" data-col="fecha" checked><span>Fecha</span></label>
+        <label class="col-toggle"><input type="checkbox" data-table="caja" data-col="detalle" checked><span>Detalle</span></label>
+        <label class="col-toggle"><input type="checkbox" data-table="caja" data-col="concepto" checked><span>Concepto</span></label>
+        <label class="col-toggle"><input type="checkbox" data-table="caja" data-col="entidad" checked><span>Entidad</span></label>
+        <label class="col-toggle"><input type="checkbox" data-table="caja" data-col="debe" checked><span>Ingreso</span></label>
+        <label class="col-toggle"><input type="checkbox" data-table="caja" data-col="haber" checked><span>Egreso</span></label>
+        <label class="col-toggle"><input type="checkbox" data-table="caja" data-col="saldo" checked><span>Saldo</span></label>
+        <label class="col-toggle"><input type="checkbox" data-table="caja" data-col="medio" checked><span>Medio pago</span></label>
+      </div>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<nav id="bottom-nav">
+  <button class="bnav active" onclick="navigate('dashboard')" data-page="dashboard">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/></svg><span>Inicio</span>
+  </button>
+  <button class="bnav" onclick="navigate('inventario')" data-page="inventario">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 17H3a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11a2 2 0 0 1 2 2v3"/><rect x="9" y="11" width="14" height="10" rx="1"/></svg><span>Autos</span>
+  </button>
+  <? if(userInfo.role==='admin'){ ?>
+  <button class="bnav" onclick="navigate('caja')" data-page="caja">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="5" width="20" height="14" rx="2"/><line x1="2" y1="10" x2="22" y2="10"/></svg><span>Caja</span>
+  </button>
+  <? } ?>
+  <? if(userInfo.role!=='vendedor'){ ?>
+  <button class="bnav" onclick="navigate('reportes')" data-page="reportes">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg><span>Reportes</span>
+  </button>
+  <? } ?>
+  <button class="bnav" onclick="navigate('config')" data-page="config">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg><span>Config</span>
+  </button>
+</nav>
+</div>
+
+<div id="ficha-overlay" onclick="cerrarFicha(event)"></div>
+<aside id="ficha-panel"><div id="ficha-inner"></div></aside>
+<div id="modal-overlay"><div id="modal-box"><div id="modal-inner"></div></div></div>
+<div id="ref-overlay" onclick="cerrarRef(event)"><div id="ref-box"><div id="ref-inner"></div></div></div>
+<div id="toast"></div>
+
+<?!= include('JS') ?>
+</body>
+</html>
