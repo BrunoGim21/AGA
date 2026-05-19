@@ -1,0 +1,1727 @@
+<script>
+// ══════════════════════════════════════════════════
+//  AGA — Cliente JS  |  v2.0
+// ══════════════════════════════════════════════════
+
+let CONFIG = null, INV_DATA = [], INV_FILTRO = 'activos';
+let FICHA_VEH = null, CAJA_TAB = 'general', dashLoaded = false;
+// Wrap in try-catch: si localStorage tiene JSON inválido de versión anterior, no crashea
+let UI_CFG = {};
+try { UI_CFG = JSON.parse(localStorage.getItem('aga_ui')||'{}'); } catch(e) { UI_CFG = {}; localStorage.removeItem('aga_ui'); }
+
+// ── Navegación ───────────────────────────────────
+function navigate(page) {
+  document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
+  document.getElementById('page-'+page)?.classList.add('active');
+  document.querySelectorAll('.nav-link,.bnav').forEach(l=>l.classList.toggle('active',l.dataset.page===page));
+  document.getElementById('navLinks').classList.remove('open');
+  if (page==='dashboard')  loadDashboard();
+  if (page==='inventario') loadInventario(INV_FILTRO);
+  if (page==='caja')       { initCajaMes(); loadCajaTab(CAJA_TAB); loadBalances(); }
+  if (page==='config')     initConfigPage();
+  if (page==='reportes')   loadReportes();
+}
+function toggleMenu(){ document.getElementById('navLinks').classList.toggle('open'); }
+
+document.addEventListener('DOMContentLoaded', () => {
+  applyStoredUI();
+  google.script.run.withSuccessHandler(c=>{CONFIG=c;}).getConfigListas();
+  loadDashboard();
+  // Optional chaining: no crashea si algún elemento no existe todavía
+  document.getElementById('ref-overlay')?.addEventListener('click', cerrarRef);
+  document.addEventListener('input', moneyInput, true);
+});
+
+let ENTIDAD_ACTUAL = 'AGA'; // AGA o Martin
+
+function setEntidad(e){
+  ENTIDAD_ACTUAL = e;
+  document.querySelectorAll('.etog').forEach(b=>b.classList.remove('active'));
+  document.getElementById('etog-'+e)?.classList.add('active');
+  loadCajaTab(CAJA_TAB);
+  loadBalances();
+}
+
+// ── Money formatting (real-time mientras se escribe) ──
+function moneyInput(e) {
+  if (!e.target.classList.contains('money') || e.target.readOnly) return;
+  const el = e.target;
+  const digits = el.value.replace(/\D/g, '');
+  if (!digits) { el.value = ''; el.dataset.raw = 0; return; }
+  const num = parseInt(digits, 10);
+  el.dataset.raw = num;
+  const formatted = '$ ' + new Intl.NumberFormat('es-AR').format(num);
+  el.value = formatted;
+  try { el.setSelectionRange(formatted.length, formatted.length); } catch(_) {}
+}
+function moneyVal(id) {
+  const el = document.getElementById(id); if(!el) return 0;
+  return parseFloat(el.dataset.raw||String(el.value).replace(/[^\d.-]/g,''))||0;
+}
+function setMoney(id, val) {
+  const el = document.getElementById(id); if(!el) return;
+  const num = parseInt(val)||0;
+  el.dataset.raw = num;
+  el.value = num ? '$ '+new Intl.NumberFormat('es-AR').format(num) : '';
+}
+
+// ── Validation system ────────────────────────────
+function validateForm(rules) {
+  let ok = true;
+  rules.forEach(({id,label,required,min,minVal}) => {
+    const el = document.getElementById(id); if(!el) return;
+    const val = el.classList.contains('money') ? moneyVal(id) : el.value?.trim();
+    let err = '';
+    if (required && (val===''||val===null||val===undefined||val===0)) err = `${label} es requerido`;
+    if (!err && min !== undefined && String(val).length < min) err = `${label} es muy corto`;
+    if (!err && minVal !== undefined && Number(val) < minVal) err = `${label} debe ser mayor a ${minVal}`;
+    setFieldError(id, err);
+    if (err) ok = false;
+  });
+  return ok;
+}
+function setFieldError(id, err) {
+  const el = document.getElementById(id); if(!el) return;
+  el.classList.toggle('field-invalid', !!err);
+  let errEl = el.parentNode.querySelector('.field-error');
+  if (err) {
+    if (!errEl) { errEl = document.createElement('div'); errEl.className='field-error'; el.parentNode.appendChild(errEl); }
+    errEl.textContent = err;
+  } else if (errEl) errEl.remove();
+}
+function clearFieldErrors() {
+  document.querySelectorAll('.field-invalid').forEach(el => el.classList.remove('field-invalid'));
+  document.querySelectorAll('.field-error').forEach(el => el.remove());
+}
+
+// ── Confirmation modal ───────────────────────────
+let _confirmCb = null;
+function showConfirm(titulo, mensaje, btnLabel, cb, tipo='warn') {
+  _confirmCb = cb;
+  document.getElementById('modal-inner').innerHTML = `
+    <div class="modal-head"><div class="modal-title">${titulo}</div>
+      <button class="btn-close" onclick="cerrarModal()"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div>
+    <div class="modal-body"><div class="confirm-box confirm-${tipo}">
+      <div class="confirm-icon">${tipo==='err'?'⚠️':'❓'}</div>
+      <div style="font-size:14px;color:var(--t1);line-height:1.5">${mensaje}</div>
+    </div></div>
+    <div class="modal-foot"><button class="btn-secondary" onclick="cerrarModal()">Cancelar</button>
+      <button class="${tipo==='err'?'btn-danger':'btn-primary'}" onclick="_runConfirm()">${btnLabel}</button>
+    </div>`;
+  abrirModal();
+  return false; // permite: if(!showConfirm(...)) return;
+}
+function _runConfirm(){ cerrarModal(); if(_confirmCb){_confirmCb();_confirmCb=null;} }
+
+// ── Saldos sub-caja ──────────────────────────────
+let SALDOS = {};
+function loadBalances() {
+  google.script.run.withSuccessHandler(s => {
+    if (!s?.ok) return;
+    SALDOS = s;
+    document.getElementById('bal-ars').textContent = fmtARS(s.saldoARS);
+    document.getElementById('bal-ars').className = s.saldoARS>=0?'caja-saldo-pos':'caja-saldo-neg';
+    document.getElementById('bal-usd').textContent = s.posUSD.toFixed(2)+' USD';
+    document.getElementById('bal-usd-ars').textContent = '≈ '+fmtARS(s.saldoUSD_ars);
+    document.getElementById('bal-chq').textContent = fmtARS(s.chequesEnCartera);
+    const total = s.saldoARS + s.saldoUSD_ars + s.chequesEnCartera;
+    document.getElementById('bal-total').textContent = fmtARS(total);
+    document.getElementById('bal-total').className = total>=0?'caja-saldo-pos':'caja-saldo-neg';
+  }).getSaldosSubCaja(ENTIDAD_ACTUAL);
+}
+
+// ══════════════════════════════════════════════════
+//  DASHBOARD
+// ══════════════════════════════════════════════════
+function loadDashboard() {
+  if (dashLoaded) return;
+  google.script.run.withSuccessHandler(renderDashboard)
+    .withFailureHandler(()=>renderDashboard({ok:true,enStock:0,reservados:0,consignas:0,ventasMes:0,gananciaMes:0,saldoCaja:0,chequesPorVencer:[],tcBlue:0,ventasRecientes:[],mes:'Dashboard'}))
+    .getDashboardData();
+}
+function renderDashboard(d) {
+  if (!d?.ok) return;
+  dashLoaded = true;
+  // Null-safe: if elements don't exist (race condition or old cache), don't crash
+  const dashMes=document.getElementById('dash-mes'); if(dashMes)dashMes.textContent=cap(d.mes||'Dashboard');
+  const tp=document.getElementById('tc-pill');
+  if(d.tcBlue&&tp){const tv=document.getElementById('tc-val');if(tv)tv.textContent=fmt(d.tcBlue);tp.style.display='';}
+  else if(tp)tp.style.display='none';
+
+  const kpiGrid=document.getElementById('kpi-grid'); if(kpiGrid) kpiGrid.innerHTML = `
+    <div class="kpi-card"><div class="kpi-lbl">Stock disponible</div><div class="kpi-val a">${d.enStock}</div>
+      <div class="kpi-sub">${d.reservados} reservados · ${d.consignas} consignas</div></div>
+    <div class="kpi-card"><div class="kpi-lbl">Ventas del mes</div><div class="kpi-val">${d.ventasMes}</div>
+      <div class="kpi-sub">vehículos vendidos</div></div>
+    <div class="kpi-card"><div class="kpi-lbl">Ganancia del mes</div><div class="kpi-val s">${fmtARS(d.gananciaMes)}</div>
+      <div class="kpi-sub">resultado operativo</div></div>
+    <div class="kpi-card"><div class="kpi-lbl">Saldo en caja</div><div class="kpi-val">${fmtARS(d.saldoCaja)}</div>
+      <div class="kpi-sub">efectivo disponible</div></div>`;
+
+  const alertas = [];
+  (d.chequesPorVencer||[]).forEach(ch=>alertas.push(`<div class="alert-card ${ch.dias<=5?'e':'w'}"><strong>Cheque #${ch.numero} vence en ${ch.dias}d</strong><span>${ch.librador} · ${ch.banco} · ${fmtARS(ch.importe)}</span></div>`));
+  const alertasWrap=document.getElementById('alertas-wrap');
+  if(alertasWrap)alertasWrap.innerHTML=alertas.length?`<p class="section-title" style="margin-bottom:10px">Alertas</p>${alertas.join('')}<div style="height:16px"></div>`:'';
+  const vw=document.getElementById('ventas-wrap');
+  if(vw&&(d.ventasRecientes||[]).length>0) {
+    vw.innerHTML=`<p class="section-title" style="margin-bottom:10px">Últimas ventas</p>`+
+      d.ventasRecientes.map(v=>`<div class="venta-row"><div class="venta-ico">🚗</div>
+        <div class="venta-info"><div class="venta-v">${v.vehiculo}</div><div class="venta-c">${v.comprador||'—'}</div></div>
+        <div class="venta-amt"><div class="venta-p">${fmtARS(v.precio)}</div><div class="venta-g">+${fmtARS(v.ganancia)}</div></div>
+        <div class="venta-f">${v.fecha}</div></div>`).join('');
+  } else if(vw) vw.innerHTML='';
+}
+
+// ══════════════════════════════════════════════════
+//  INVENTARIO
+// ══════════════════════════════════════════════════
+function loadInventario(f) {
+  INV_FILTRO=f||'activos';
+  document.getElementById('inv-tbody').innerHTML=`<tr><td colspan="7" class="empty-row">Cargando...</td></tr>`;
+  document.getElementById('inv-sub').textContent=({activos:'Activos',stock:'En stock',reservado:'Reservados',consigna:'Consignas',vendidos:'Vendidos'})[INV_FILTRO]||'';
+  google.script.run.withSuccessHandler(data=>{INV_DATA=data;renderTabla();}).withFailureHandler(()=>toast('Error','err')).getVehiculos(INV_FILTRO);
+}
+function filtrarInv(btn,f){document.querySelectorAll('.filter-tabs .ftab').forEach(b=>b.classList.remove('active'));btn.classList.add('active');loadInventario(f);}
+function filtrarTabla(){const q=document.getElementById('inv-search').value.toLowerCase();renderTabla(q?INV_DATA.filter(v=>`${v.dominio} ${v.marca} ${v.modelo} ${v.ex_dueno_nombre} ${v.ex_dueno_apellido}`.toLowerCase().includes(q)):INV_DATA);}
+
+function renderTabla(data){
+  const rows=data||INV_DATA, tbody=document.getElementById('inv-tbody');
+  if(!rows.length){tbody.innerHTML=`<tr><td colspan="7" class="empty-row">Sin vehículos</td></tr>`;return;}
+  const isAdmin=USER.role==='admin';
+  const cols=UI_CFG.cols_inv||{dominio:1,vehiculo:1,tipo:1,estado:1,costo:1,dias:1};
+  tbody.innerHTML=rows.map(v=>`<tr onclick="abrirFicha('${v.id}')">
+    ${cols.dominio!==false?`<td><strong>${v.dominio}</strong></td>`:''}
+    ${cols.vehiculo!==false?`<td>${v.marca} ${v.modelo} ${v.anio}</td>`:''}
+    ${cols.tipo!==false?`<td><span class="badge badge-${v.tipo.toLowerCase()}">${v.tipo}</span></td>`:''}
+    ${cols.estado!==false?`<td><span class="badge badge-${v.estado.toLowerCase()}">${v.estado}</span></td>`:''}
+    ${cols.costo!==false?`<td class="num">${fmtARS(v.costo_total)}</td>`:''}
+    ${cols.dias!==false?`<td class="num"><span class="${diasClass(v.dias_stock)}">${v.dias_stock}d</span></td>`:''}
+    <td onclick="event.stopPropagation()">
+      <div class="row-actions">
+        <button class="btn-ico" onclick="abrirFicha('${v.id}')"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg></button>
+        ${isAdmin?`<button class="btn-ico" onclick="abrirEditarVehiculo('${v.id}')"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>
+        <button class="btn-ico danger" onclick="eliminarVehiculo('${v.id}','${v.dominio}')"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/></svg></button>`:''}
+      </div>
+    </td></tr>`).join('');
+}
+function diasClass(d){return d<30?'dias-ok':d<60?'dias-warn':'dias-err';}
+
+// ── Ficha ──────────────────────────────────────
+function abrirFicha(id){
+  document.getElementById('ficha-inner').innerHTML=`<div style="padding:80px 20px;text-align:center;color:var(--t3)">Cargando...</div>`;
+  document.getElementById('ficha-overlay').classList.add('open');
+  document.getElementById('ficha-panel').classList.add('open');
+  document.body.style.overflow='hidden';
+  google.script.run.withSuccessHandler(renderFicha).withFailureHandler(()=>toast('Error','err')).getVehiculoDetalle(id);
+}
+function cerrarFicha(e){if(e&&e.target!==document.getElementById('ficha-overlay'))return;_cerrarFicha();}
+function _cerrarFicha(){document.getElementById('ficha-overlay').classList.remove('open');document.getElementById('ficha-panel').classList.remove('open');document.body.style.overflow='';FICHA_VEH=null;}
+
+function renderFicha(res){
+  if(!res?.ok){toast('Error','err');return;}
+  FICHA_VEH=res.vehiculo;
+  const v=res.vehiculo,gastos=res.gastos||[];
+  const totalGastos=gastos.reduce((s,g)=>s+g.importe_ars,0);
+  const isAdmin=USER.role==='admin', canSell=USER.role!=='dueno';
+  const exDueno=[v.ex_dueno_nombre,v.ex_dueno_apellido].filter(Boolean).join(' ');
+
+  document.getElementById('ficha-inner').innerHTML=`
+    <div class="ficha-head">
+      <div class="ficha-head-top">
+        <div><div class="ficha-dominio">${v.dominio}</div><div class="ficha-modelo">${v.marca} ${v.modelo} ${v.anio}</div></div>
+        <button class="btn-close" onclick="_cerrarFicha()"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+      </div>
+      <div class="ficha-badges">
+        <span class="badge badge-${v.tipo.toLowerCase()}">${v.tipo}</span>
+        <span class="badge badge-${v.estado.toLowerCase()}">${v.estado}</span>
+        ${exDueno?`<span class="badge" style="background:#f3f4f6;color:var(--t2)">👤 ${exDueno}${v.ex_dueno_tel?' · 📞 '+v.ex_dueno_tel:''}</span>`:''}
+      </div>
+    </div>
+    <div class="ficha-body">
+      <div class="ficha-tabs">
+        <button class="ficha-tab active" onclick="switchFichaTab(this,'info')">Información</button>
+        <button class="ficha-tab" onclick="switchFichaTab(this,'gastos')">Gastos (${gastos.length})</button>
+      </div>
+      <div id="ftab-info">
+        <div class="info-grid">
+          ${v.tipo!=='OKM'?`<div class="info-item"><div class="info-lbl">Precio de toma</div><div class="info-val">${fmtARS(v.precio_toma)}</div></div>`:''}
+          ${v.tipo==='OKM'?`<div class="info-item"><div class="info-lbl">Precio de compra</div><div class="info-val">${fmtARS(v.precio_toma)}</div></div>`:''}
+          ${v.precio_tabla&&v.tipo==='Usado'?`<div class="info-item"><div class="info-lbl">Tabla</div><div class="info-val">${fmtARS(v.precio_tabla)} <small style="color:var(--t3)">(${pct(v.precio_toma,v.precio_tabla)}%)</small></div></div>`:''}
+          ${v.tipo==='Consigna'&&v.markup_consigna?`<div class="info-item"><div class="info-lbl">Markup</div><div class="info-val">${((v.markup_consigna-1)*100).toFixed(0)}%</div></div>`:''}
+          <div class="info-item"><div class="info-lbl">Gastos acumulados</div><div class="info-val">+ ${fmtARS(totalGastos)}</div></div>
+          <div class="info-item accent"><div class="info-lbl">Costo total</div><div class="info-val">${fmtARS(v.costo_total)}</div></div>
+          <div class="info-item"><div class="info-lbl">Fecha ingreso</div><div class="info-val">${v.fecha_ingreso||'—'}</div></div>
+        </div>
+        ${v.observaciones?`<div class="info-item full" style="margin-bottom:14px"><div class="info-lbl">Observaciones</div><div style="font-size:13px;color:var(--t2);margin-top:4px">${v.observaciones}</div></div>`:''}
+        ${canSell||isAdmin?`<div class="ficha-actions">
+          ${v.estado!=='Vendido'?`
+            ${canSell?`<button class="btn-primary" onclick="abrirVentaDesde('${v.id}')"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 12 20 22 4 22 4 12"/><rect x="2" y="7" width="20" height="5"/></svg>Registrar venta</button>`:''}
+            ${isAdmin&&v.estado==='Stock'?`<button class="btn-secondary" onclick="cambiarEstado('${v.id}','Reservado')">Reservar</button>`:''}
+            ${isAdmin&&v.estado==='Reservado'?`<button class="btn-secondary" onclick="cambiarEstado('${v.id}','Stock')">← Stock</button>`:''}
+          `:`<span style="color:var(--ok);font-weight:600">✓ Vendido</span>`}
+          ${isAdmin?`<button class="btn-secondary" onclick="abrirEditarVehiculo('${v.id}')">Editar</button>
+          <button class="btn-danger" onclick="eliminarVehiculo('${v.id}','${v.dominio}')">Eliminar</button>`:''}
+        </div>`:''}
+      </div>
+      <div id="ftab-gastos" style="display:none">
+        ${isAdmin?`<button class="btn-primary" style="margin-bottom:12px;width:100%" onclick="abrirGastoDesdeVeh('${v.id}','${v.dominio}')">+ Agregar gasto</button>`:''}
+        ${!gastos.length?`<p style="text-align:center;color:var(--t3);padding:24px 0">Sin gastos</p>`
+          :gastos.map(g=>`<div class="gasto-row">
+            <div><span class="gasto-cat">${g.categoria}</span><div style="font-size:10px;color:var(--t3);margin-top:2px">${g.fecha}</div></div>
+            <div class="gasto-desc"><strong>${g.descripcion||'—'}</strong><span>${g.proveedor||''}</span></div>
+            <div style="text-align:right"><div class="gasto-amt">${fmtARS(g.importe_ars)}</div></div>
+            ${isAdmin?`<button class="btn-ico danger" onclick="eliminarGasto('${g.id}','${v.id}')"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/></svg></button>`:''}
+          </div>`).join('')}
+        ${gastos.length?`<div style="display:flex;justify-content:space-between;padding:10px 0;border-top:1px solid var(--bord);margin-top:8px"><span style="font-size:13px;font-weight:600;color:var(--t2)">Total gastos</span><span style="font-size:14px;font-weight:700">${fmtARS(totalGastos)}</span></div>`:''}
+      </div>
+    </div>`;
+}
+function switchFichaTab(btn,tab){document.querySelectorAll('.ficha-tab').forEach(b=>b.classList.remove('active'));btn.classList.add('active');document.getElementById('ftab-info').style.display=tab==='info'?'':'none';document.getElementById('ftab-gastos').style.display=tab==='gastos'?'':'none';}
+function cambiarEstado(id,est){google.script.run.withSuccessHandler(r=>{if(r.ok){toast('Estado actualizado','ok');abrirFicha(id);loadInventario(INV_FILTRO);}}).cambiarEstadoVehiculo(id,est);}
+function eliminarGasto(id,idVeh){if(!confirm('¿Eliminar?'))return;google.script.run.withSuccessHandler(r=>{if(r.ok){toast('Eliminado','ok');abrirFicha(idVeh);}}).deleteGastoVehiculo(id,idVeh);}
+function eliminarVehiculo(id,dom){if(!confirm(`¿Eliminar ${dom}?`))return;google.script.run.withSuccessHandler(r=>{if(r.ok){toast('Eliminado','ok');_cerrarFicha();loadInventario(INV_FILTRO);dashLoaded=false;}}).deleteVehiculo(id);}
+
+// Registrar venta desde ficha (abre wizard pre-cargado con venta_auto)
+function abrirVentaDesde(idVeh){
+  _cerrarFicha();
+  navigate('caja');
+  setTimeout(()=>abrirWizard('ingreso','venta_auto',idVeh),150);
+}
+
+// Agregar gasto desde ficha (abre wizard pre-cargado con gasto_auto)
+function abrirGastoDesdeVeh(idVeh,dom){
+  _cerrarFicha();
+  navigate('caja');
+  setTimeout(()=>abrirWizard('egreso','gasto_auto',idVeh),150);
+}
+
+// ── Modal vehiculo ─────────────────────────────
+function abrirNuevoVehiculo(){ abrirModalVehiculo(null); }
+function abrirEditarVehiculo(id){const v=(FICHA_VEH&&FICHA_VEH.id===id)?FICHA_VEH:(INV_DATA.find(x=>x.id===id)||null);abrirModalVehiculo(v);}
+
+function abrirModalVehiculo(v){
+  const isEdit=!!v,tipo=v?.tipo||'Usado',hoy=new Date().toISOString().slice(0,10);
+  const marcas=CONFIG?.marcas||[];
+  const marcaOpts=marcas.map(m=>`<option ${(v?.marca||'').toUpperCase()===m?'selected':''}>${m}</option>`).join('');
+  document.getElementById('modal-inner').innerHTML=`
+    <div class="modal-head"><div class="modal-title">${isEdit?'Editar':'Nuevo'} vehículo</div>
+      <button class="btn-close" onclick="cerrarModal()"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div>
+    <div class="modal-body">
+      ${!isEdit?`<div class="tipo-selector"><button class="tipo-btn ${tipo==='Usado'?'active':''}" onclick="selTipo(this,'Usado')">🚗 Usado</button><button class="tipo-btn ${tipo==='OKM'?'active':''}" onclick="selTipo(this,'OKM')">✨ OKM</button><button class="tipo-btn ${tipo==='Consigna'?'active':''}" onclick="selTipo(this,'Consigna')">🤝 Consigna</button></div>`:`<input type="hidden" id="v-tipo" value="${tipo}">`}
+      <input type="hidden" id="v-id" value="${v?.id||''}">
+      <div class="form-row">
+        <div class="form-group"><label class="lbl">Dominio *</label><input class="field" id="v-dominio" value="${v?.dominio||''}" placeholder="ABC123" style="text-transform:uppercase"></div>
+        <div class="form-group"><label class="lbl">Fecha ingreso</label><input class="field" type="date" id="v-fecha" value="${v?.fecha_ingreso?isoDate(v.fecha_ingreso):hoy}"></div>
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label class="lbl">Marca *</label>
+          <div class="marca-wrap"><select class="field" id="v-marca"><option value="">— Seleccioná —</option>${marcaOpts}</select>
+          <button type="button" onclick="abrirAgregarMarca()">+ Marca</button></div></div>
+        <div class="form-group"><label class="lbl">Modelo *</label><input class="field" id="v-modelo" value="${v?.modelo||''}" placeholder="GOL TREND"></div>
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label class="lbl">Año *</label><input class="field" type="number" id="v-anio" value="${v?.anio||''}" placeholder="2019"></div>
+        <div></div>
+      </div>
+      <div class="tipo-fields ${tipo==='Usado'?'visible':''}" id="campos-usado">
+        <hr class="form-divider">
+        <div class="form-row-3">
+          <div class="form-group"><label class="lbl">Nombre ex dueño</label><input class="field" id="v-exnombre" value="${v?.ex_dueno_nombre||''}" placeholder="Juan"></div>
+          <div class="form-group"><label class="lbl">Apellido</label><input class="field" id="v-exapellido" value="${v?.ex_dueno_apellido||''}" placeholder="García"></div>
+          <div class="form-group"><label class="lbl">Teléfono</label><input class="field" id="v-extel" value="${v?.ex_dueno_tel||''}" placeholder="2346-XXXXXX"></div>
+        </div>
+        <div class="form-row">
+          <div class="form-group"><label class="lbl">Precio de toma *</label><input class="field money" id="v-ptoma" oninput="calcPct()"></div>
+          <div class="form-group"><label class="lbl">Precio tabla</label><input class="field money" id="v-ptabla" oninput="calcPct()"></div>
+        </div>
+        <div class="form-group"><label class="lbl">% Toma/Tabla</label><input class="field" id="v-pct" readonly style="width:120px;background:#f9fafb"></div>
+      </div>
+      <div class="tipo-fields ${tipo==='OKM'?'visible':''}" id="campos-okm">
+        <hr class="form-divider">
+        <div class="form-row-3">
+          <div class="form-group" style="grid-column:1/3"><label class="lbl">Proveedor</label><input class="field" id="v-proveedor" value="${v?.ex_dueno_nombre||''}" placeholder="AUTOTAG / RUSSONIEELLO"></div>
+          <div class="form-group"><label class="lbl">Tel. proveedor</label><input class="field" id="v-provtel" value="${v?.ex_dueno_tel||''}" placeholder="Opcional"></div>
+        </div>
+        <div class="form-group"><label class="lbl">Precio de compra *</label><input class="field money" id="v-pcompra"></div>
+      </div>
+      <div class="tipo-fields ${tipo==='Consigna'?'visible':''}" id="campos-consigna">
+        <hr class="form-divider">
+        <div class="form-row-3">
+          <div class="form-group"><label class="lbl">Nombre propietario</label><input class="field" id="v-propnombre" value="${v?.ex_dueno_nombre||''}" placeholder="Juan"></div>
+          <div class="form-group"><label class="lbl">Apellido</label><input class="field" id="v-propapellido" value="${v?.ex_dueno_apellido||''}" placeholder="García"></div>
+          <div class="form-group"><label class="lbl">Teléfono</label><input class="field" id="v-proptel" value="${v?.ex_dueno_tel||''}" placeholder="2346-XXXXXX"></div>
+        </div>
+        <div class="form-group"><label class="lbl">Markup %</label><input class="field" type="number" id="v-markup" value="${v?.markup_consigna?(v.markup_consigna-1)*100:30}" style="width:100px"></div>
+      </div>
+      <div class="form-group"><label class="lbl">Observaciones</label><textarea class="field" id="v-obs" rows="2">${v?.observaciones||''}</textarea></div>
+      ${!isEdit?`<div class="usd-partial-wrap" style="margin-top:4px">
+        <label class="usd-partial-toggle" onclick="vzToggleCaja(this)">
+          <input type="checkbox" id="v-reg-caja" checked>
+          <span class="usd-toggle-label">Registrar egreso en caja al guardar</span>
+        </label>
+        <div id="v-caja-extra" style="margin-top:10px">
+          <div class="form-row">
+            <div class="form-group"><label class="lbl">Medio de pago</label>
+              <select class="field" id="v-medio-compra">${(CONFIG?.medios_pago||['Efectivo A','Efectivo B','Transferencia']).map(m=>`<option>${m}</option>`).join('')}</select></div>
+            <div class="form-group"><label class="lbl">💵 Parte en USD (opcional)</label>
+              <div style="display:flex;gap:6px"><input class="field" type="number" id="v-usd-monto" placeholder="USD" step="0.01" style="flex:1">
+              <input class="field" type="number" id="v-usd-tc" placeholder="TC" style="width:90px"></div></div>
+          </div>
+        </div>
+      </div>`:''}
+    </div>
+    <div class="modal-foot"><button class="btn-secondary" onclick="cerrarModal()">Cancelar</button>
+      <button class="btn-primary" onclick="guardarVehiculo()">${isEdit?'Guardar cambios':'Agregar al inventario'}</button></div>`;
+  // Restore money values for edit
+  if(v){setTimeout(()=>{setMoney('v-ptoma',v.precio_toma);setMoney('v-ptabla',v.precio_tabla);setMoney('v-pcompra',v.precio_toma);calcPct();},50);}
+  abrirModal();
+}
+function selTipo(btn,tipo){document.querySelectorAll('.tipo-btn').forEach(b=>b.classList.remove('active'));btn.classList.add('active');document.querySelectorAll('.tipo-fields').forEach(f=>f.classList.remove('visible'));document.getElementById('campos-'+tipo.toLowerCase())?.classList.add('visible');}
+function calcPct(){const pt=moneyVal('v-ptoma'),pl=moneyVal('v-ptabla'),el=document.getElementById('v-pct');if(el)el.value=(pt&&pl)?`${((pt/pl)*100).toFixed(1)}%`:'—';}
+function vzToggleCaja(label){const cb=label.querySelector('input');const extra=document.getElementById('v-caja-extra');if(extra)extra.style.display=cb.checked?'':'none';}
+function abrirAgregarMarca(){const m=prompt('Nombre de la nueva marca:');if(!m?.trim())return;google.script.run.withSuccessHandler(r=>{if(r.ok){toast(`Marca "${r.marca}" agregada`,'ok');const sel=document.getElementById('v-marca');const opt=document.createElement('option');opt.value=r.marca;opt.textContent=r.marca;opt.selected=true;sel.appendChild(opt);if(CONFIG)CONFIG.marcas=[...CONFIG.marcas,r.marca].sort();}else toast(r.error||'Error','err');}).saveMarca(m.trim());}
+
+function guardarVehiculo(){
+  const tipoActivo=document.querySelector('.tipo-btn.active');
+  const tipoMap={'🚗 Usado':'Usado','✨ OKM':'OKM','🤝 Consigna':'Consigna'};
+  const tipo=tipoActivo?tipoMap[tipoActivo.textContent.trim()]:(document.getElementById('v-tipo')?.value||'Usado');
+  const data={id:document.getElementById('v-id').value||null,dominio:document.getElementById('v-dominio').value.toUpperCase().trim(),marca:document.getElementById('v-marca').value.trim(),modelo:document.getElementById('v-modelo').value.trim(),anio:parseInt(document.getElementById('v-anio').value)||'',tipo,fecha_ingreso:document.getElementById('v-fecha').value,observaciones:document.getElementById('v-obs').value};
+  if(!data.dominio||!data.marca||!data.modelo){toast('Completá dominio, marca y modelo','err');return;}
+  if(tipo==='Usado'){data.precio_toma=moneyVal('v-ptoma');data.precio_tabla=moneyVal('v-ptabla');data.ex_dueno_nombre=document.getElementById('v-exnombre').value;data.ex_dueno_apellido=document.getElementById('v-exapellido').value;data.ex_dueno_tel=document.getElementById('v-extel').value;}
+  if(tipo==='OKM'){data.precio_toma=moneyVal('v-pcompra');data.ex_dueno_nombre=document.getElementById('v-proveedor').value;data.ex_dueno_tel=document.getElementById('v-provtel').value;}
+  if(tipo==='Consigna'){data.markup_consigna=1+(parseFloat(document.getElementById('v-markup').value)||30)/100;data.ex_dueno_nombre=document.getElementById('v-propnombre').value;data.ex_dueno_apellido=document.getElementById('v-propapellido').value;data.ex_dueno_tel=document.getElementById('v-proptel').value;}
+  // Caja egreso opcional al registrar compra (solo vehículo nuevo, no consigna)
+  if(!data.id && tipo!=='Consigna'){
+    data.registrar_caja=document.getElementById('v-reg-caja')?.checked??true;
+    data.medio_pago_compra=document.getElementById('v-medio-compra')?.value||'Efectivo';
+    const pusd=parseFloat(document.getElementById('v-usd-monto')?.value)||0;
+    const ptc=parseFloat(document.getElementById('v-usd-tc')?.value)||0;
+    if(pusd&&ptc){data.usd_monto=pusd;data.usd_tc=ptc;}
+  }
+  const btn=document.querySelector('.modal-foot .btn-primary');btn.disabled=true;btn.textContent='Guardando...';
+  google.script.run.withSuccessHandler(r=>{
+    cerrarModal();
+    toast(r.nuevo?`Vehículo agregado${data.registrar_caja?' · Egreso en caja':''}`:' Actualizado','ok');
+    loadInventario(INV_FILTRO);dashLoaded=false;
+  }).withFailureHandler(()=>{toast('Error','err');btn.disabled=false;btn.textContent='Guardar';}).saveVehiculo(data);
+}
+
+// ══════════════════════════════════════════════════
+//  CAJA — SUB-TABS Y WIZARD
+// ══════════════════════════════════════════════════
+function initCajaMes(){
+  const sel=document.getElementById('caja-mes');
+  if(sel.children.length>1) return;
+  sel.innerHTML='<option value="">Todo el período</option>';
+  const now=new Date();
+  for(let i=0;i<12;i++){const d=new Date(now.getFullYear(),now.getMonth()-i,1);const opt=document.createElement('option');opt.value=`${d.getMonth()+1}-${d.getFullYear()}`;opt.textContent=d.toLocaleString('es-AR',{month:'long',year:'numeric'});if(i===0)opt.selected=true;sel.appendChild(opt);}
+}
+
+function switchCajaTab(btn,tab){
+  CAJA_TAB=tab;
+  document.querySelectorAll('.itab').forEach(b=>b.classList.remove('active'));btn.classList.add('active');
+  document.querySelectorAll('.itab-content').forEach(c=>c.classList.remove('active'));
+  document.getElementById('itab-'+tab)?.classList.add('active');
+  loadCajaTab(tab);
+}
+
+function recargarCajaActual(){ loadCajaTab(CAJA_TAB); }
+
+function loadCajaTab(tab){
+  const sel=document.getElementById('caja-mes'),val=sel?.value||'',mes=val?val.split('-')[0]:null,anio=val?val.split('-')[1]:null;
+  if(tab==='general') loadMovimientos(mes,anio,'general');
+  if(tab==='ars')     loadMovimientos(mes,anio,'ARS');
+  if(tab==='gastos')  loadGastosAgencia(mes,anio);
+  if(tab==='cheques') loadCheques('');
+  if(tab==='dolares') loadDolares(mes,anio);
+  loadBalances(); // always refresh balances
+}
+
+function loadMovimientos(mes,anio,subCaja){
+  const tbodyId = (subCaja==='ARS') ? 'caja-tbody-ars' : 'caja-tbody-general';
+  const tbody=document.getElementById(tbodyId);
+  if(!tbody) return;
+  tbody.innerHTML=`<tr><td colspan="8" class="empty-row">Cargando...</td></tr>`;
+  const serverFilter = (subCaja==='general') ? null : subCaja;
+  google.script.run.withSuccessHandler(r=>{
+    if(!r.ok){toast('Error','err');return;}
+    const s=r.saldo;
+    // Update main saldo display
+    const saldoEl=document.getElementById('caja-saldo-txt');
+    if(saldoEl){saldoEl.textContent=fmtARS(s);saldoEl.className=s>=0?'caja-saldo-pos':'caja-saldo-neg';}
+    if(!r.movimientos.length){tbody.innerHTML=`<tr><td colspan="8" class="empty-row">Sin movimientos en este período</td></tr>`;return;}
+    const subBadgeColor={ARS:'#dbeafe',USD:'#d1fae5',CHQ:'#ede9fe'};
+    tbody.innerHTML=r.movimientos.map(m=>{
+      const ref=parseRef(m.referencia);
+      const subLabel=m.sub_caja||'ARS';
+      return `<tr class="no-click">
+        <td style="white-space:nowrap;font-size:12px">${m.fecha}</td>
+        <td><strong style="font-size:13px">${m.detalle||'—'}</strong>${m.observacion?`<br><small style="color:var(--t3)">${m.observacion}</small>`:''}</td>
+        <td style="font-size:12px;color:var(--t2)">${m.concepto||'—'}</td>
+        <td><span class="badge" style="background:${subBadgeColor[subLabel]||'#f3f4f6'};color:var(--t2)">${subLabel}</span></td>
+        <td class="num">${m.debe?`<span class="income-val">+${fmtARS(m.debe)}</span>`:'—'}</td>
+        <td class="num">${m.haber?`<span class="expense-val">-${fmtARS(m.haber)}</span>`:'—'}</td>
+        <td class="num"><span class="${m.saldo>=0?'caja-saldo-pos':'caja-saldo-neg'}">${fmtARS(m.saldo)}</span></td>
+        <td><div style="display:flex;align-items:center;gap:4px">
+          ${ref?`<span class="ref-badge" onclick="abrirRef('${m.referencia}')">${ref.icon} ${ref.label}</span>`:''}
+          ${USER.role==='admin'?`<div class="row-actions"><button class="btn-ico danger" onclick="eliminarMovimientoCaja('${m.id}')" title="Eliminar"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/></svg></button></div>`:''}
+        </div></td>
+      </tr>`;
+    }).join('');
+  }).getMovimientosCaja(mes,anio,serverFilter,ENTIDAD_ACTUAL);
+}
+
+function parseRef(ref){
+  if(!ref) return null;
+  const [tipo]=ref.split(':');
+  const map={VTA:{icon:'🚗',label:'Venta'},GV:{icon:'🔧',label:'Gasto auto'},GA:{icon:'📑',label:'Gasto agencia'},CHQ:{icon:'📋',label:'Cheque'},USD:{icon:'💵',label:'Dólar'},VEH:{icon:'🚗',label:'Auto'}};
+  return map[tipo]||null;
+}
+
+function abrirRef(ref){
+  if(!ref) return;
+  const [tipo,id]=ref.split(':');
+  if(!id){return;}
+  // Show a summary modal
+  document.getElementById('ref-inner').innerHTML=`<div class="ref-modal-head"><strong>${tipo} — ${id}</strong><button class="btn-close" onclick="cerrarRef()"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div><div class="ref-modal-body" style="text-align:center;padding:30px;color:var(--t3)">Cargando detalle...</div><div class="ref-modal-foot"><button class="btn-secondary" onclick="cerrarRef()">Cerrar</button>${tipo==='VEH'||tipo==='VTA'||tipo==='GV'?`<button class="btn-primary" onclick="irARef('${ref}')">Ver en inventario →</button>`:''}${tipo==='CHQ'?`<button class="btn-primary" onclick="irATab('cheques')">Ver cheques →</button>`:''}${tipo==='USD'?`<button class="btn-primary" onclick="irATab('dolares')">Ver dólares →</button>`:''}${tipo==='GA'?`<button class="btn-primary" onclick="irATab('gastos')">Ver gastos →</button>`:''}
+  </div>`;
+  document.getElementById('ref-overlay').classList.add('open');
+  // Load detail based on type
+  if(tipo==='VTA'||tipo==='GV'||tipo==='VEH'){
+    const idVeh=tipo==='VEH'?id:null;
+    // For now show the id and info
+    document.getElementById('ref-inner').querySelector('.ref-modal-body').innerHTML=`
+      <div class="ref-detail-row"><span class="ref-detail-lbl">Referencia</span><span class="ref-detail-val">${ref}</span></div>
+      <p style="color:var(--t3);font-size:12px;text-align:center;margin-top:12px">Usá el botón para ver el detalle completo</p>`;
+  }
+}
+function cerrarRef(e){if(e&&e.target!==document.getElementById('ref-overlay'))return;document.getElementById('ref-overlay').classList.remove('open');}
+function irARef(ref){cerrarRef();const[tipo,id]=ref.split(':');navigate('inventario');if(id&&id.startsWith('VEH'))setTimeout(()=>abrirFicha(id),300);}
+function irATab(tab){cerrarRef();navigate('caja');setTimeout(()=>{document.querySelector(`.itab[onclick*="${tab}"]`)?.click();},100);}
+function eliminarMovimientoCaja(id){showConfirm('Eliminar movimiento','¿Eliminar este movimiento? Se recalcularán los saldos.','Eliminar',()=>{google.script.run.withSuccessHandler(r=>{if(r.ok){toast('Movimiento eliminado','ok');loadCajaTab(CAJA_TAB);loadBalances();}}).deleteMovimientoCaja(id);},'err');}
+function eliminarMovimiento(id){eliminarMovimientoCaja(id);}// alias
+
+// ── Gastos agencia ────────────────────────────
+function loadGastosAgencia(mes,anio){
+  document.getElementById('gastos-tbody').innerHTML=`<tr><td colspan="9" class="empty-row">Cargando...</td></tr>`;
+  google.script.run.withSuccessHandler(rows=>{
+    const tbody=document.getElementById('gastos-tbody');
+    if(!rows.length){tbody.innerHTML=`<tr><td colspan="9" class="empty-row">Sin gastos en este período</td></tr>`;return;}
+    const isAdmin=USER.role==='admin';
+    tbody.innerHTML=rows.map(g=>`<tr class="no-click">
+      <td style="font-size:12px;white-space:nowrap">${g.fecha}</td>
+      <td><span class="badge" style="background:#f3f4f6;color:var(--t2)">${g.categoria}</span></td>
+      <td><strong>${g.proveedor||'—'}</strong></td>
+      <td style="font-size:12px;color:var(--t3)">${g.descripcion||''}</td>
+      <td><span style="font-size:11px;color:var(--t2)">${g.tipo||'Variable'}</span></td>
+      <td class="num">${fmtARS(g.neto)}</td>
+      <td class="num" style="color:var(--t3)">${g.iva?fmtARS(g.iva):'—'}</td>
+      <td class="num"><strong>${fmtARS(g.total)}</strong></td>
+      <td>${isAdmin?`<div class="row-actions">
+        <button class="btn-ico danger" onclick="eliminarGastoAg('${g.id}')" title="Eliminar"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/></svg></button>
+      </div>`:''}</td>
+    </tr>`).join('');
+  }).getGastosAgencia(mes,anio);
+}
+function eliminarGastoAg(id){showConfirm('Eliminar gasto','¿Eliminar este gasto de agencia?','Eliminar',()=>google.script.run.withSuccessHandler(r=>{if(r.ok){toast('Gasto eliminado','ok');loadGastosAgencia();}}).deleteGastoAgencia(id),'err');}
+
+// ── Cheques ────────────────────────────────────
+function filtrarCheques(btn,f){document.querySelectorAll('#itab-cheques .ftab').forEach(b=>b.classList.remove('active'));btn.classList.add('active');loadCheques(f);}
+function loadCheques(f){
+  document.getElementById('cheques-tbody').innerHTML=`<tr><td colspan="9" class="empty-row">Cargando...</td></tr>`;
+  google.script.run.withSuccessHandler(rows=>{
+    const tbody=document.getElementById('cheques-tbody');
+    if(!rows.length){tbody.innerHTML=`<tr><td colspan="9" class="empty-row">Sin cheques</td></tr>`;return;}
+    const isAdmin=USER.role==='admin';
+    const estBadge={'En cartera':'badge-stock','Depositado':'badge-usado','Acreditado':'badge-vendido','Rechazado':'badge-vencido','Anulado':'badge-reservado','Emitido':'badge-reservado','Cobrado':'badge-vendido'};
+    tbody.innerHTML=rows.map(c=>{
+      let btns='';
+      if(isAdmin){
+        if(c.estado==='En cartera'&&c.tipo==='De tercero'){
+          btns+=`<button class="btn-ico ok" onclick="cambiarEstadoCheque('${c.id}','Depositado')" title="Depositar">🏦</button>`;
+          btns+=`<button class="btn-ico ok" onclick="cambiarEstadoCheque('${c.id}','Acreditado')" title="Acreditar">✅</button>`;
+          btns+=`<button class="btn-ico danger" onclick="cambiarEstadoCheque('${c.id}','Rechazado')" title="Rechazar">❌</button>`;
+        }
+        if(c.estado==='Depositado') btns+=`<button class="btn-ico ok" onclick="cambiarEstadoCheque('${c.id}','Acreditado')" title="Acreditar">✅</button>`;
+        if(c.estado==='Emitido'&&c.tipo==='Propio') btns+=`<button class="btn-ico ok" onclick="cambiarEstadoCheque('${c.id}','Cobrado')" title="Cobrado">✅</button>`;
+        btns+=`<button class="btn-ico" onclick="abrirEditarCheque('${c.id}')" title="Editar"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg></button>`;
+        btns+=`<button class="btn-ico danger" onclick="eliminarCheque('${c.id}')" title="Eliminar"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/></svg></button>`;
+      }
+      return `<tr class="no-click">
+        <td><strong>${c.numero||'—'}</strong></td>
+        <td><span class="badge" style="background:#f3f4f6;color:var(--t2)">${c.tipo}</span></td>
+        <td>${c.banco||'—'}</td><td>${c.librador||'—'}</td>
+        <td class="num"><strong>${fmtARS(c.importe)}</strong></td>
+        <td style="font-size:12px"><span class="${c.dias_vto!==null?(c.dias_vto<0?'dias-err':c.dias_vto<7?'dias-warn':'dias-ok'):''}">${c.fecha_vto||'—'}</span></td>
+        <td style="font-size:12px;color:var(--t3)">${c.fecha_cobro||'—'}</td>
+        <td><span class="badge ${estBadge[c.estado]||'badge-usado'}">${c.estado}</span></td>
+        <td><div class="row-actions" style="opacity:1">${btns}</div></td>
+      </tr>`;
+    }).join('');
+  }).getCheques(f, ENTIDAD_ACTUAL);
+}
+
+function cambiarEstadoCheque(id,estado){
+  if(['Acreditado','Cobrado','Depositado'].includes(estado)){
+    const hoy=new Date().toISOString().slice(0,10);
+    document.getElementById('modal-inner').innerHTML=`
+      <div class="modal-head"><div class="modal-title">Marcar como ${estado}</div>
+        <button class="btn-close" onclick="cerrarModal()"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div>
+      <div class="modal-body"><div class="form-group"><label class="lbl">Fecha de ${estado.toLowerCase()}</label>
+        <input class="field" type="date" id="chq-fst" value="${hoy}"></div></div>
+      <div class="modal-foot"><button class="btn-secondary" onclick="cerrarModal()">Cancelar</button>
+        <button class="btn-ok" onclick="confirmarEstadoCheque('${id}','${estado}')">Confirmar</button></div>`;
+    abrirModal();
+  } else {
+    showConfirm(`Marcar ${estado}`,`¿Confirmar que este cheque fue ${estado.toLowerCase()}?`,estado,()=>
+      google.script.run.withSuccessHandler(r=>{if(r.ok){toast(`Cheque ${estado}`,'ok');loadCheques('');loadBalances();}}).updateEstadoCheque(id,estado,null));
+  }
+}
+function confirmarEstadoCheque(id,estado){const f=document.getElementById('chq-fst').value;cerrarModal();google.script.run.withSuccessHandler(r=>{if(r.ok){toast(`Cheque ${estado}`,'ok');loadCheques('');loadBalances();}}).updateEstadoCheque(id,estado,f);}
+function eliminarCheque(id){showConfirm('Eliminar cheque','¿Eliminar este cheque definitivamente?','Eliminar',()=>google.script.run.withSuccessHandler(r=>{if(r.ok){toast('Eliminado','ok');loadCheques('');loadBalances();}}).deleteCheque(id),'err');}
+function abrirEditarCheque(id){
+  google.script.run.withSuccessHandler(rows=>{
+    const c=rows.find(r=>r.id===id);if(!c)return;
+    document.getElementById('modal-inner').innerHTML=`
+      <div class="modal-head"><div class="modal-title">Editar cheque</div>
+        <button class="btn-close" onclick="cerrarModal()"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button></div>
+      <div class="modal-body">
+        <div class="form-row">
+          <div class="form-group"><label class="lbl">Número</label><input class="field" id="ec-num" value="${c.numero||''}"></div>
+          <div class="form-group"><label class="lbl">Banco</label><input class="field" id="ec-banco" value="${c.banco||''}"></div>
+        </div>
+        <div class="form-row">
+          <div class="form-group"><label class="lbl">Librador</label><input class="field" id="ec-librador" value="${c.librador||''}"></div>
+          <div class="form-group"><label class="lbl">Importe</label><input class="field money" id="ec-importe"></div>
+        </div>
+        <div class="form-row">
+          <div class="form-group"><label class="lbl">Fecha vencimiento</label><input class="field" type="date" id="ec-vto" value="${isoDate(c.fecha_vto)}"></div>
+          <div class="form-group"><label class="lbl">Fecha cobro</label><input class="field" type="date" id="ec-cobro" value="${isoDate(c.fecha_cobro)}"></div>
+        </div>
+        <div class="form-group"><label class="lbl">Estado</label>
+          <select class="field" id="ec-estado">${['En cartera','Depositado','Acreditado','Rechazado','Anulado','Emitido','Cobrado'].map(e=>`<option ${c.estado===e?'selected':''}>${e}</option>`).join('')}</select></div>
+        <div class="form-group"><label class="lbl">Observaciones</label><textarea class="field" id="ec-obs" rows="2">${c.observaciones||''}</textarea></div>
+      </div>
+      <div class="modal-foot"><button class="btn-secondary" onclick="cerrarModal()">Cancelar</button>
+        <button class="btn-primary" onclick="guardarChequeEdicion('${id}')">Guardar</button></div>`;
+    setMoney('ec-importe',c.importe);abrirModal();
+  }).getCheques('');
+}
+function guardarChequeEdicion(id){
+  if(!validateForm([{id:'ec-num',label:'Número',required:true},{id:'ec-importe',label:'Importe',required:true,minVal:1}]))return;
+  const data={numero:document.getElementById('ec-num').value,banco:document.getElementById('ec-banco').value,librador:document.getElementById('ec-librador').value,importe:moneyVal('ec-importe'),fecha_vto:document.getElementById('ec-vto').value,fecha_cobro:document.getElementById('ec-cobro').value,estado:document.getElementById('ec-estado').value,observaciones:document.getElementById('ec-obs').value};
+  google.script.run.withSuccessHandler(r=>{if(r.ok){cerrarModal();toast('Cheque actualizado','ok');loadCheques('');}}).updateCheque(id,data);
+}
+
+// ── Dólares ────────────────────────────────────
+function loadDolares(mes,anio){
+  document.getElementById('dolares-tbody').innerHTML=`<tr><td colspan="7" class="empty-row">Cargando...</td></tr>`;
+  google.script.run.withSuccessHandler(rows=>{
+    const tbody=document.getElementById('dolares-tbody');
+    if(!rows.length){tbody.innerHTML=`<tr><td colspan="7" class="empty-row">Sin movimientos en USD</td></tr>`;return;}
+    const ingTipos=['Compra','Ingreso','Cobro'];
+    const total_usd=rows.reduce((s,r)=>s+(ingTipos.includes(r.tipo)?r.monto_usd:-r.monto_usd),0);
+    const isAdmin=USER.role==='admin';
+    tbody.innerHTML=rows.map(r=>`<tr class="no-click">
+      <td style="font-size:12px">${r.fecha}</td>
+      <td><span class="badge ${ingTipos.includes(r.tipo)?'badge-stock':'badge-vendido'}">${r.tipo}</span></td>
+      <td class="num"><strong>${r.monto_usd.toFixed(2)}</strong></td>
+      <td class="num" style="color:var(--t3)">$ ${fmt(r.tc)}</td>
+      <td class="num">${fmtARS(r.monto_ars)}</td>
+      <td>${r.contraparte||'—'}</td>
+      <td>${isAdmin?`<div class="row-actions"><button class="btn-ico danger" onclick="eliminarDolar('${r.id}')" title="Eliminar"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/></svg></button></div>`:''}</td>
+    </tr>`).join('')+`<tr class="no-click" style="background:#f9fafb;font-weight:700">
+      <td colspan="2" style="font-size:12px;color:var(--t3)">POSICIÓN NETA</td>
+      <td class="num" style="color:${total_usd>=0?'var(--ok)':'var(--err)'}">${total_usd>=0?'+':''}${total_usd.toFixed(2)} USD</td>
+      <td colspan="4"></td></tr>`;
+  }).getDolares(mes,anio,ENTIDAD_ACTUAL);
+}
+function eliminarDolar(id){showConfirm('Eliminar registro USD','¿Eliminar este movimiento en dólares?','Eliminar',()=>google.script.run.withSuccessHandler(r=>{if(r.ok){toast('Eliminado','ok');loadDolares();loadBalances();}}).deleteDolar(id),'err');}
+
+// ══════════════════════════════════════════════════
+//  WIZARD — Nuevo movimiento de caja
+// ══════════════════════════════════════════════════
+let WZ = { tipo:null, concepto:null, preVehiculo:null }; // wizard state
+
+function abrirWizard(tipo,concepto,idVehiculo){
+  WZ = {tipo:tipo||null, concepto:concepto||null, preVehiculo:idVehiculo||null};
+  MIX_ROWS = []; // limpiar estado del mixto
+  renderWizard();
+  abrirModal();
+}
+
+function renderWizard(){
+  document.getElementById('modal-inner').innerHTML=`
+    <div class="modal-head">
+      <div class="modal-title">Nuevo movimiento de caja</div>
+      <button class="btn-close" onclick="cerrarModal()"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+    </div>
+    <div class="modal-body">
+      <!-- Paso 1: tipo -->
+      <div id="wz-paso1" class="wizard-step ${WZ.concepto?'':'active'}">
+        <div class="ie-toggle">
+          <button class="ie-btn ${WZ.tipo==='ingreso'?'active-ing':''}" onclick="wzSetTipo('ingreso')"><span class="ie-btn-icon">↑</span> INGRESO</button>
+          <button class="ie-btn ${WZ.tipo==='egreso'?'active-eg':''}"   onclick="wzSetTipo('egreso')"><span class="ie-btn-icon">↓</span> EGRESO</button>
+        </div>
+        <div id="wz-concepts" style="${WZ.tipo?'':'display:none'}"></div>
+      </div>
+      <!-- Paso 2: formulario -->
+      <div id="wz-paso2" class="wizard-step ${WZ.concepto?'active':''}">
+        <div id="wz-form-body"></div>
+      </div>
+    </div>
+    <div class="modal-foot" id="wz-footer">
+      <button class="btn-secondary" onclick="wzVolver()">← Volver</button>
+      <button class="btn-primary" id="wz-guardar" onclick="wzGuardar()" style="display:none">Guardar movimiento</button>
+    </div>`;
+
+  if(WZ.tipo&&!WZ.concepto) renderConceptos();
+  if(WZ.tipo&&WZ.concepto) wzRenderForm();
+}
+
+function wzSetTipo(tipo){
+  WZ.tipo=tipo; WZ.concepto=null;
+  document.querySelectorAll('.ie-btn').forEach(b=>b.classList.remove('active-ing','active-eg'));
+  document.querySelector(`.ie-btn:${tipo==='ingreso'?'first':'last'}-child`).classList.add(tipo==='ingreso'?'active-ing':'active-eg');
+  const cw=document.getElementById('wz-concepts'); cw.style.display=''; cw.innerHTML='';
+  renderConceptos();
+}
+
+const CONCEPTOS = {
+  ingreso:[
+    {key:'venta_auto',   icon:'🚗', label:'Venta de auto'},
+    {key:'cobro_cheque', icon:'📋', label:'Cobro cheque'},
+    {key:'reg_usd_ing',  icon:'💵', label:'Cobré en USD'},
+    {key:'venta_usd',    icon:'💱', label:'Venta USD (intercambio)'},
+    {key:'deposito',     icon:'🏦', label:'Depósito / Transferencia'},
+    {key:'aporte',       icon:'🔄', label:'Aporte de capital'},
+    {key:'otros_ingreso',icon:'➕', label:'Otros ingresos'},
+  ],
+  egreso:[
+    {key:'gasto_agencia',icon:'📑', label:'Gasto de agencia'},
+    {key:'gasto_auto',   icon:'🔧', label:'Gasto en vehículo'},
+    {key:'compra_auto',  icon:'🚗', label:'Compra de auto'},
+    {key:'reg_usd_eg',   icon:'💵', label:'Pagué en USD'},
+    {key:'compra_usd',   icon:'💱', label:'Compra USD (intercambio)'},
+    {key:'pago_cheque',  icon:'📋', label:'Cheque emitido'},
+    {key:'sueldo',       icon:'💸', label:'Sueldo / Comisión'},
+    {key:'retiro',       icon:'🔄', label:'Retiro'},
+    {key:'otros_egreso', icon:'➖', label:'Otros egresos'},
+  ]
+};
+
+function renderConceptos(){
+  const list=CONCEPTOS[WZ.tipo]||[];
+  document.getElementById('wz-concepts').innerHTML=`<p style="font-size:12px;font-weight:600;color:var(--t3);text-transform:uppercase;letter-spacing:.06em;margin-bottom:10px">Seleccioná el tipo de movimiento</p>
+    <div class="concept-grid">${list.map(c=>`<button class="concept-btn ${WZ.concepto===c.key?'active':''}" onclick="wzSelConcepto('${c.key}')"><span class="cicon">${c.icon}</span><span>${c.label}</span></button>`).join('')}</div>`;
+}
+
+function wzSelConcepto(key){
+  WZ.concepto=key;
+  document.querySelectorAll('.concept-btn').forEach(b=>b.classList.remove('active'));
+  document.querySelectorAll('.concept-btn').forEach(b=>{if(b.querySelector('span:last-child').textContent===CONCEPTOS[WZ.tipo]?.find(c=>c.key===key)?.label)b.classList.add('active');});
+  document.getElementById('wz-paso1').classList.remove('active');
+  document.getElementById('wz-paso2').classList.add('active');
+  document.getElementById('wz-guardar').style.display='';
+  wzRenderForm();
+}
+
+function wzVolver(){
+  if(WZ.concepto){WZ.concepto=null;document.getElementById('wz-paso2').classList.remove('active');document.getElementById('wz-paso1').classList.add('active');document.getElementById('wz-guardar').style.display='none';renderConceptos();}
+  else cerrarModal();
+}
+
+function wzRenderForm(){
+  const label=CONCEPTOS[WZ.tipo]?.find(c=>c.key===WZ.concepto)?.label||WZ.concepto;
+  const hoy=new Date().toISOString().slice(0,10);
+  const tc=CONFIG?.tc_blue||'';
+  const mdps=CONFIG?.medios_pago||['Efectivo A','Efectivo B','Transferencia','Cheque'];
+  const cats=CONFIG?.categorias_gasto||['Alquileres','Sueldos','Combustible'];
+  const icon=CONCEPTOS[WZ.tipo]?.find(c=>c.key===WZ.concepto)?.icon||'';
+
+  let formHtml=`<div class="wizard-header">
+    <span class="wizard-tipo-badge ${WZ.tipo==='ingreso'?'ing':'eg'}">${WZ.tipo==='ingreso'?'↑ INGRESO':'↓ EGRESO'}</span>
+    <span class="wizard-concepto">${icon} ${label}</span>
+  </div>
+  <div class="form-row"><div class="form-group"><label class="lbl">Fecha *</label><input class="field" type="date" id="wf-fecha" value="${hoy}"></div>
+  <div class="form-group"><label class="lbl">Entidad</label><select class="field" id="wf-entidad"><option value="AGA" ${(ENTIDAD_ACTUAL||'AGA')==='AGA'?'selected':''}>AGA</option><option value="Martin" ${ENTIDAD_ACTUAL==='Martin'?'selected':''}>Martín</option><option value="AGM">AGM</option></select></div></div>`;
+
+  // Specific fields per concept
+  if(WZ.concepto==='venta_auto'){
+    formHtml+=`<div class="form-group"><label class="lbl">Vehículo *</label>
+      <select class="field" id="wf-vehiculo" onchange="wzPreloadVehiculo()"><option value="">Cargando...</option></select>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label class="lbl">Precio de venta *</label>
+        <input class="field money" id="wf-precio" oninput="wzCalcGanancia()">
+        <div id="wf-precio-hint" class="field-hint"></div>
+      </div>
+      <div class="form-group"><label class="lbl">TC del día (blue)</label>
+        <input class="field" type="number" id="wf-tc-dia" value="${tc}" placeholder="${tc}">
+      </div>
+    </div>
+    <p class="section-title" style="margin-bottom:8px">Forma de cobro</p>
+    <div class="pago-row"><div class="pago-lbl">Efectivo ARS</div>
+      <input class="field money" id="wf-ef" style="width:160px" oninput="wzCalcDif()"></div>
+    <div class="pago-row"><div class="pago-lbl">Financiación</div>
+      <input class="field money" id="wf-fin" style="width:160px" oninput="wzCalcDif()"></div>
+    <!-- Parte de pago con auto (punto 3) -->
+    <div class="pago-row" style="align-items:flex-start;flex-direction:column;gap:8px">
+      <label class="usd-partial-toggle" onclick="wzToggleVehPago(this)" style="cursor:pointer;display:flex;align-items:center;gap:8px">
+        <input type="checkbox" id="wf-veh-toggle">
+        <span style="font-size:13px;font-weight:500">🚗 Parte de pago con auto</span>
+      </label>
+      <div id="wf-veh-pago-fields" style="display:none;width:100%">
+        <div class="form-row" style="margin-top:0">
+          <div class="form-group"><label class="lbl">Auto entregado como parte de pago</label>
+            <select class="field" id="wf-auto-parte" onchange="wzSetVehParteCosto()">
+              <option value="">Cargando vehículos...</option>
+            </select>
+          </div>
+          <div class="form-group"><label class="lbl">Valor del parte de pago</label>
+            <input class="field money" id="wf-veh" oninput="wzCalcDif()">
+            <div id="wf-veh-costo-hint" class="field-hint"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="pago-dif" id="wf-dif"><span style="color:var(--err)">Diferencia sin asignar</span><span id="wf-dif-val" style="font-weight:700;color:var(--err)"></span></div>
+    <div class="form-row" style="margin-top:10px">
+      <div class="form-group"><label class="lbl">Comprador *</label>
+        <div class="ac-wrap"><input class="field" id="wf-comprador" placeholder="Nombre o apellido" oninput="acBuscar(this,'ac-wf')"><div class="ac-list" id="ac-wf"></div></div>
+      </div>
+      <div class="form-group"><label class="lbl">Vendedor</label>
+        <select class="field" id="wf-vendedor"><option value="">Sin asignar</option></select>
+      </div>
+    </div>
+    <div id="wf-ganancia-prev" style="display:none" class="ganancia-preview pos">
+      <div class="gp-lbl">Ganancia estimada</div><div class="gp-val" id="wf-gp-val">$ 0</div>
+      <div class="gp-sub" id="wf-gp-sub"></div>
+    </div>`;
+  }
+  else if(WZ.concepto==='gasto_auto'){
+    formHtml+=`
+    <div class="form-section-title">💰 ¿Cuánto?</div>
+    <div class="form-group"><label class="lbl">Importe ARS *</label><input class="field money" id="wf-importe"></div>
+    <div class="form-section-title" style="margin-top:12px">🚗 ¿En qué auto?</div>
+    <div class="form-group"><label class="lbl">Vehículo *</label><select class="field" id="wf-vehiculo"><option value="">Cargando...</option></select></div>
+    <div class="form-row">
+      <div class="form-group"><label class="lbl">Categoría *</label><select class="field" id="wf-cat-gv"><option>Reparaciones</option><option>Lavado</option><option>Verificación</option><option>Patente</option><option>Seguro</option><option>Gestión</option><option>Otro</option></select></div>
+      <div class="form-group"><label class="lbl">Proveedor</label><input class="field" id="wf-prov" placeholder="Taller, etc."></div>
+    </div>
+    <div class="form-group"><label class="lbl">Descripción *</label><input class="field" id="wf-desc" placeholder="¿Qué se hizo?"></div>`;
+  }
+  else if(WZ.concepto==='gasto_agencia'){
+    // Monto primero (lo más importante)
+    formHtml+=`
+    <div class="form-section-title">💰 ¿Cuánto?</div>
+    <div class="form-row-3">
+      <div class="form-group"><label class="lbl">Neto *</label><input class="field money" id="wf-neto" oninput="wzCalcTotal()"></div>
+      <div class="form-group"><label class="lbl">IVA</label><input class="field money" id="wf-iva" oninput="wzCalcTotal()"></div>
+      <div class="form-group"><label class="lbl">Total</label><input class="field money" id="wf-total" readonly style="background:#f9fafb;font-weight:700"></div>
+    </div>
+    <div class="form-section-title" style="margin-top:12px">📋 ¿Para qué?</div>
+    <div class="form-row">
+      <div class="form-group"><label class="lbl">Categoría *</label><select class="field" id="wf-cat-ga">${cats.map(c=>`<option>${c}</option>`).join('')}</select></div>
+      <div class="form-group"><label class="lbl">Tipo</label><select class="field" id="wf-tipo-ga"><option>Variable</option><option>Fijo</option></select></div>
+    </div>
+    <div class="form-group"><label class="lbl">Proveedor *</label><input class="field" id="wf-prov-ga" placeholder="Razón social o nombre"></div>
+    <div class="form-group"><label class="lbl">Descripción</label><input class="field" id="wf-desc-ga" placeholder="Detalle del gasto"></div>
+    <div class="form-group"><label class="lbl">Canal</label><select class="field" id="wf-canal"><option value="1">Canal 1</option><option value="2">Canal 2</option></select></div>`;
+  }
+  else if(WZ.concepto==='cobro_cheque'||WZ.concepto==='pago_cheque'){
+    formHtml+=`<div class="form-row"><div class="form-group"><label class="lbl">Número de cheque</label><input class="field" id="wf-chq-num" placeholder="12345678"></div>
+      <div class="form-group"><label class="lbl">Banco</label><input class="field" id="wf-banco" placeholder="Santander, BBVA..."></div></div>
+      <div class="form-row"><div class="form-group"><label class="lbl">${WZ.concepto==='cobro_cheque'?'Librador (quien firmó)':'Beneficiario (a favor de)'}</label><input class="field" id="wf-librador" placeholder="Nombre"></div>
+      <div class="form-group"><label class="lbl">Importe *</label><input class="field money" id="wf-chq-importe"></div></div>
+      <div class="form-row"><div class="form-group"><label class="lbl">Fecha emisión</label><input class="field" type="date" id="wf-emision" value="${hoy}"></div>
+      <div class="form-group"><label class="lbl">Fecha vencimiento *</label><input class="field" type="date" id="wf-vto"></div></div>`;
+  }
+  else if(WZ.concepto==='venta_usd'||WZ.concepto==='compra_usd'){
+    const esCom=WZ.concepto==='compra_usd';
+    formHtml+=`<div class="usd-mode-note"><span class="usd-badge">💱 Intercambio</span> Pasás ${esCom?'pesos a dólares':'dólares a pesos'}. El saldo en caja cambia por el ARS equivalente.</div>
+      <div class="form-row"><div class="form-group"><label class="lbl">${esCom?'Monto USD a comprar *':'Monto USD a vender *'}</label><input class="field" type="number" id="wf-musd" step="0.01" placeholder="0.00" oninput="wzCalcARS()"></div>
+      <div class="form-group"><label class="lbl">Tipo de cambio (TC) *</label><input class="field" type="number" id="wf-tc" value="${tc}" placeholder="${tc}" oninput="wzCalcARS()"></div></div>
+      <div class="form-group"><label class="lbl">Total en ARS (calculado)</label>
+        <input class="field money" id="wf-mars" readonly style="background:#f9fafb;font-size:16px;font-weight:700">
+        <div class="field-hint">USD × TC</div></div>
+      <div class="form-group"><label class="lbl">${esCom?'A quién le compramos':'A quién le vendemos'}</label><input class="field" id="wf-contraparte" placeholder="Nombre o razón social"></div>`;
+  }
+  else if(WZ.concepto==='reg_usd_ing'||WZ.concepto==='reg_usd_eg'){
+    const esIng=WZ.concepto==='reg_usd_ing';
+    formHtml+=`<div class="usd-mode-note"><span class="usd-badge">${esIng?'💵 Cobro en USD':'💵 Pago en USD'}</span> Se registra el <strong>equivalente en ARS</strong> en caja y el detalle en la tabla de dólares.</div>
+      <div class="form-row"><div class="form-group"><label class="lbl">Monto en USD *</label><input class="field" type="number" id="wf-musd" step="0.01" placeholder="0.00" oninput="wzCalcARS()"></div>
+      <div class="form-group"><label class="lbl">TC (precio del dólar) *</label><input class="field" type="number" id="wf-tc" value="${tc}" placeholder="${tc}" oninput="wzCalcARS()"></div></div>
+      <div class="form-group"><label class="lbl">Equivalente en ARS (entra/sale de caja)</label>
+        <input class="field money" id="wf-mars" readonly style="background:#f9fafb;font-size:18px;font-weight:700;color:${esIng?'var(--ok)':'var(--err)'}">
+        <div class="field-hint">Este monto se registra en la caja principal</div></div>
+      <div class="form-group"><label class="lbl">${esIng?'Quién te pagó en USD':'A quién le pagaste en USD'}</label><input class="field" id="wf-contraparte" placeholder="Nombre o razón social"></div>
+      <div class="form-group"><label class="lbl">Descripción</label><input class="field" id="wf-desc-gen" placeholder="Por qué fue este cobro/pago"></div>`;
+  }
+  else if(WZ.concepto==='compra_auto'){
+    const anioActual=new Date().getFullYear();
+    formHtml+=`
+    <div class="form-section-title">🚗 Datos del vehículo</div>
+    <div class="form-row">
+      <div class="form-group"><label class="lbl">Dominio *</label>
+        <input class="field" id="wf-dominio" placeholder="ABC123" style="text-transform:uppercase" oninput="this.value=this.value.toUpperCase()"></div>
+      <div class="form-group"><label class="lbl">Año *</label>
+        <input class="field" type="number" id="wf-anio" placeholder="${anioActual}" min="1950" max="${anioActual+1}" value="${anioActual}"></div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label class="lbl">Marca *</label>
+        <select class="field" id="wf-marca"><option value="">Seleccioná...</option></select></div>
+      <div class="form-group"><label class="lbl">Modelo *</label>
+        <input class="field" id="wf-modelo" placeholder="Golf, Corolla, Hilux..."></div>
+    </div>
+    <div class="form-row">
+      <div class="form-group"><label class="lbl">Tipo</label>
+        <select class="field" id="wf-tipo-veh"><option value="Usado">Usado</option><option value="OKM">0km</option><option value="Consigna">Consigna</option></select></div>
+      <div class="form-group"><label class="lbl">Precio tabla (opcional)</label>
+        <input class="field money" id="wf-precio-tabla" placeholder="$ 0"></div>
+    </div>
+    <div class="form-group"><label class="lbl">Propietario anterior / Vendedor</label>
+      <input class="field" id="wf-exdueno" placeholder="Nombre del vendedor"></div>
+    <div class="form-section-title" style="margin-top:12px">💰 ¿Cuánto se pagó?</div>
+    <div class="form-group"><label class="lbl">Precio de compra *</label>
+      <input class="field money" id="wf-importe"></div>`;
+  }
+  else {
+    // Genérico (sueldo, retiro, depósito, aporte, otros)
+    formHtml+=`<div class="form-group"><label class="lbl">Descripción / Detalle *</label><input class="field" id="wf-desc-gen" placeholder="¿Qué movimiento es?"></div>
+      <div class="form-row"><div class="form-group"><label class="lbl">Importe *</label><input class="field money" id="wf-importe"></div>
+      <div class="form-group"><label class="lbl">Medio de pago</label><select class="field" id="wf-medio">${mdps.map(m=>`<option>${m}</option>`).join('')}</select></div></div>`;
+  }
+
+  // Partial USD toggle — solo para ingresos (egresos usan el bloque de origen del pago)
+  const noUsdTipos=['reg_usd_ing','reg_usd_eg','venta_usd','compra_usd','cobro_cheque','pago_cheque'];
+  if(!noUsdTipos.includes(WZ.concepto)&&WZ.tipo==='ingreso'){
+    formHtml+=`<div class="usd-partial-wrap">
+      <label class="usd-partial-toggle" onclick="wzToggleUSD(this)">
+        <input type="checkbox" id="wf-usd-toggle">
+        <span class="usd-toggle-label">💵 Parte del cobro fue en dólares</span>
+      </label>
+      <div id="wf-usd-extra" style="display:none;margin-top:10px">
+        <div class="form-row">
+          <div class="form-group"><label class="lbl">Monto en USD</label><input class="field" type="number" id="wf-pusd" step="0.01" placeholder="0.00" oninput="calcParcialUSD()"></div>
+          <div class="form-group"><label class="lbl">TC</label><input class="field" type="number" id="wf-ptc" value="${tc}" oninput="calcParcialUSD()"></div>
+        </div>
+        <div class="form-group"><label class="lbl">= ARS equivalente</label><input class="field money" id="wf-pars" readonly style="background:#f9fafb;font-weight:600"></div>
+      </div>
+    </div>`;
+  }
+
+  // ORIGEN DEL PAGO — siempre visible para todos los egresos (excepto flujos puramente USD/cheque)
+  const noPaySrc=['reg_usd_eg','compra_usd','pago_cheque'];
+  if(WZ.tipo==='egreso' && !noPaySrc.includes(WZ.concepto)){
+    const sARS=SALDOS.saldoARS||0, sUSD=SALDOS.posUSD||0, sChq=SALDOS.chequesEnCartera||0;
+    const tcB=SALDOS.tcBlue||CONFIG?.tc_blue||1450;
+    formHtml+=`<div class="pay-sources-wrap">
+      <p class="section-title" style="margin-bottom:10px">💳 ¿Con qué se paga?</p>
+
+      <!-- Selector de medio -->
+      <div class="form-group" style="margin-bottom:10px">
+        <select class="field" id="ps-medio" onchange="payMedioChanged()" style="font-size:14px;font-weight:600">
+          <option value="ARS">💵 Efectivo / Pesos ARS</option>
+          <option value="USD">💰 Dólares</option>
+          <option value="CHQ">📋 Cheque en cartera</option>
+          <option value="MIX">🔀 Mixto (varios métodos)</option>
+        </select>
+      </div>
+
+      <!-- ARS single (visible por defecto) -->
+      <div class="pay-source-block" id="pbs-ars">
+        <div class="pay-source-header">
+          <span>💵 <strong>Pesos ARS</strong></span>
+          <span class="pay-avail ${sARS<0?'neg':'pos'}">Disponible: ${fmtARS(sARS)}</span>
+        </div>
+        <input class="field money" id="ps-ars" placeholder="$ 0" oninput="payValidateARS();calcPayTotal()">
+        <div id="ps-ars-err" class="pay-field-err" style="display:none">⚠ Excede el saldo en ARS (${fmtARS(sARS)})</div>
+      </div>
+
+      <!-- USD single (oculto) -->
+      <div class="pay-source-block" id="pbs-usd" style="display:none">
+        <div class="pay-source-header">
+          <span>💰 <strong>Dólares</strong></span>
+          <span class="pay-avail ${sUSD<0?'neg':'pos'}">${sUSD.toFixed(2)} USD disponibles</span>
+        </div>
+        <div class="pay-usd-row">
+          <input type="number" id="ps-usd-monto" placeholder="0.00 USD" step="0.01" class="field" style="flex:1;min-width:80px" oninput="payCalcUSD();payValidateUSD()">
+          <span class="pay-usd-sep">×</span><span style="font-size:12px;color:var(--t3)">TC</span>
+          <input type="number" id="ps-usd-tc" value="${tcB}" class="field" style="width:85px" oninput="payCalcUSD()">
+          <span class="pay-usd-sep">=</span>
+          <input class="field money" id="ps-usd-ars" readonly placeholder="$ 0" style="flex:1;min-width:100px;background:#f0fdf4;font-weight:700">
+        </div>
+        <div id="ps-usd-err" class="pay-field-err" style="display:none">⚠ Excede el saldo en USD (${sUSD.toFixed(2)} USD)</div>
+      </div>
+
+      <!-- CHQ single (oculto) -->
+      <div class="pay-source-block" id="pbs-chq" style="display:none">
+        <div class="pay-source-header">
+          <span>📋 <strong>Cheques en cartera</strong></span>
+          <span class="pay-avail ${sChq<=0?'neg':'pos'}">${fmtARS(sChq)} disponibles</span>
+        </div>
+        <div id="ps-chq-list" class="pay-chq-list"><div class="pay-chq-loading">Cargando...</div></div>
+        <div id="ps-chq-subtotal" style="display:none;font-size:12px;color:var(--ok);font-weight:600;text-align:right;margin-top:4px">
+          Subtotal cheques: <span id="ps-chq-total-val">$ 0</span></div>
+      </div>
+
+      <!-- MIXTO (oculto por defecto) -->
+      <div class="pay-source-block" id="pbs-mix" style="display:none">
+        <div id="mix-rows-container"></div>
+        <button class="btn-secondary" id="mix-add-btn" onclick="mixAddRow()" style="width:100%;margin-top:8px;font-size:12px;justify-content:center">+ Agregar otro método de pago</button>
+      </div>
+
+      <!-- Total -->
+      <div class="pay-total-bar">
+        <span>Total asignado:</span>
+        <strong id="ps-total" style="font-size:15px">$ 0</strong>
+        <span id="ps-dif-msg" style="font-size:12px;margin-left:4px;display:none"></span>
+      </div>
+    </div>`;
+  }
+
+  formHtml+=`<div class="form-group"><label class="lbl">Observaciones</label><textarea class="field" id="wf-obs" rows="2" placeholder="Opcional"></textarea></div>`;
+  document.getElementById('wf-form-body')||document.createElement('div');
+  document.getElementById('wz-paso2').querySelector('#wz-form-body')||
+    (document.getElementById('wz-paso2').innerHTML='<div id="wz-form-body"></div>');
+  document.getElementById('wz-form-body').innerHTML=formHtml;
+
+  // Delegación de eventos: auto-fill al cambiar el importe
+  document.getElementById('wz-form-body')?.addEventListener('input', e=>{
+    if(['wf-importe','wf-total','wf-neto'].includes(e.target?.id)) payAutoFillFromImporte();
+  });
+  // Inicializar medio: mostrar solo ARS por defecto
+  if(WZ.tipo==='egreso' && !['reg_usd_eg','compra_usd','pago_cheque'].includes(WZ.concepto)){
+    payMedioChanged();
+  }
+
+  // Load vehicle dropdowns + cheques after render
+  if(WZ.concepto==='venta_auto'){
+    google.script.run.withSuccessHandler(vs=>{
+      VEH_MAP={}; vs.forEach(v=>{VEH_MAP[v.id]=v;});
+      const sel=document.getElementById('wf-vehiculo'); if(!sel) return;
+      sel.innerHTML='<option value="">— Seleccioná un auto —</option>'+vs.map(v=>`<option value="${v.id}">${v.label}</option>`).join('');
+      if(WZ.preVehiculo){sel.value=WZ.preVehiculo;wzPreloadVehiculo();}
+      google.script.run.withSuccessHandler(vends=>{const sel2=document.getElementById('wf-vendedor');if(!sel2)return;vends.forEach(v=>{const o=document.createElement('option');o.value=v.nombre_completo;o.textContent=v.nombre_completo;sel2.appendChild(o);});}).getVendedores();
+      // También cargar vehículos disponibles para parte de pago
+      google.script.run.withSuccessHandler(todos=>{
+        const sel3=document.getElementById('wf-auto-parte');if(!sel3)return;
+        sel3.innerHTML='<option value="">— Seleccioná auto —</option>'+todos.map(v=>`<option value="${v.id}" data-costo="${v.costo_total}">${v.label}</option>`).join('');
+      }).getTodosVehiculos();
+    }).getVehiculosDisponibles();
+  } // cierra if(venta_auto)
+  else if(WZ.concepto==='gasto_auto')
+    google.script.run.withSuccessHandler(vs=>{
+      const sel=document.getElementById('wf-vehiculo'); if(!sel) return;
+      sel.innerHTML='<option value="">— Seleccioná un auto —</option>'+vs.map(v=>`<option value="${v.id}">${v.label}</option>`).join('');
+      if(WZ.preVehiculo) sel.value=WZ.preVehiculo;
+    }).getTodosVehiculos();
+  else if(WZ.concepto==='compra_auto')
+    google.script.run.withSuccessHandler(marcas=>{
+      const sel=document.getElementById('wf-marca'); if(!sel) return;
+      marcas.forEach(m=>{const o=document.createElement('option');o.value=m;o.textContent=m;sel.appendChild(o);});
+    }).getMarcas();
+
+  // Para todos los egresos: cargar cheques en cartera inmediatamente (para panel CHQ)
+  if(WZ.tipo==='egreso' && !['reg_usd_eg','compra_usd','pago_cheque'].includes(WZ.concepto)){
+    google.script.run.withSuccessHandler(cheques=>{
+      const list=document.getElementById('ps-chq-list'); if(!list)return;
+      if(!cheques.length){
+        list.innerHTML='<div class="pay-chq-loading" style="color:var(--t3)">No hay cheques en cartera disponibles</div>';
+        return;
+      }
+      list.innerHTML=cheques.map(c=>`<label class="pay-chq-item">
+        <input type="checkbox" name="ps-chq" data-id="${c.id}" data-importe="${c.importe}" onchange="payUpdateChequeSubtotal();calcPayTotal()">
+        <div class="pay-chq-info">
+          <strong>#${c.numero}</strong> · ${c.banco}
+          <span style="color:var(--t3)">${c.librador}${c.fecha_vto?' · vence '+c.fecha_vto:''}</span>
+        </div>
+        <strong class="pay-chq-amt">${fmtARS(c.importe)}</strong>
+      </label>`).join('');
+    }).getChequesDisponibles(ENTIDAD_ACTUAL);
+  }
+}
+
+let VEH_MAP = {}; // cache de datos de vehículos para el wizard
+
+// Toggle para "parte de pago con auto"
+function wzToggleVehPago(label){
+  const cb=label.querySelector('input');
+  const fields=document.getElementById('wf-veh-pago-fields');
+  if(fields) fields.style.display=cb.checked?'':'none';
+  if(!cb.checked) setMoney('wf-veh',0);
+  wzCalcDif();
+}
+
+// Pre-cargar el costo estimado cuando se selecciona el auto de parte de pago
+function wzSetVehParteCosto(){
+  const sel=document.getElementById('wf-auto-parte'); if(!sel||!sel.value) return;
+  const opt=sel.options[sel.selectedIndex];
+  const costo=parseFloat(opt?.getAttribute('data-costo'))||0;
+  const hint=document.getElementById('wf-veh-costo-hint');
+  if(hint&&costo>0){hint.textContent=`Costo registrado: ${fmtARS(costo)}`;hint.style.color='var(--t2)';}
+  // No pre-llenamos el valor — el vendedor negocia libremente
+  wzCalcDif();
+}
+
+function wzPreloadVehiculo(){
+  const sel=document.getElementById('wf-vehiculo'); if(!sel||!sel.value) return;
+  const veh=VEH_MAP[sel.value]||{};
+  sel.dataset.costo=veh.costo_total||0;
+  
+  // Precio sugerido de venta (punto 2): explica de dónde viene
+  let sugerido=0, hintTxt='';
+  if(veh.tipo==='Consigna'&&veh.markup_consigna>0){
+    sugerido=Math.round((veh.precio_toma||0)*veh.markup_consigna);
+    hintTxt=`Tabla consigna = toma × ${((veh.markup_consigna-1)*100).toFixed(0)}%`;
+  } else if(veh.precio_tabla>0){
+    sugerido=veh.precio_tabla;
+    hintTxt=`Precio tabla del vehículo`;
+  } else if(veh.costo_total>0){
+    sugerido=Math.round(veh.costo_total*1.20);
+    hintTxt=`Costo ${fmtARS(veh.costo_total)} + 20% margen`;
+  }
+  if(sugerido>0){
+    setMoney('wf-precio',sugerido);
+    const hint=document.getElementById('wf-precio-hint');
+    if(hint){hint.textContent=`💡 ${hintTxt} — podés cambiarlo`;hint.style.color='var(--ok)';}
+  }
+  wzCalcGanancia();
+}
+function wzCalcGanancia(){
+  const precio=moneyVal('wf-precio');
+  const costo=parseFloat(document.getElementById('wf-vehiculo')?.dataset.costo)||0;
+  const g=precio-costo, prev=document.getElementById('wf-ganancia-prev');
+  if(prev&&precio>0){prev.style.display='';prev.className=`ganancia-preview ${g>=0?'pos':'neg'}`;document.getElementById('wf-gp-val').textContent=fmtARS(g);document.getElementById('wf-gp-sub').textContent=`${((g/(costo||1))*100).toFixed(1)}% sobre costo · Costo: ${fmtARS(costo)}`;}
+  wzCalcDif();
+}
+function wzCalcDif(){
+  const precio=moneyVal('wf-precio'),ef=moneyVal('wf-ef'),veh=moneyVal('wf-veh'),fin=moneyVal('wf-fin');
+  const dif=precio-(ef+veh+fin),difRow=document.getElementById('wf-dif');
+  if(difRow&&precio>0&&Math.abs(dif)>1){difRow.classList.add('show');document.getElementById('wf-dif-val').textContent=fmtARS(Math.abs(dif));}
+  else if(difRow)difRow.classList.remove('show');
+}
+function wzCalcTotal(){
+  const n=moneyVal('wf-neto'),i=moneyVal('wf-iva');
+  setMoney('wf-total',n+i);
+  payAutoFillFromImporte(); // actualizar campo de pago cuando cambia el total
+}
+
+// ── Medio de pago ────────────────────────────────────────────
+function payMedioChanged(){
+  const medio=document.getElementById('ps-medio')?.value||'ARS';
+  const isMix=medio==='MIX';
+  ['ars','usd','chq'].forEach(k=>{
+    const el=document.getElementById('pbs-'+k);
+    if(el) el.style.display=(!isMix&&medio===k.toUpperCase())?'':'none';
+  });
+  document.getElementById('pbs-mix').style.display=isMix?'':'none';
+  if(isMix){
+    if(!MIX_ROWS.length){MIX_ROWS=[{medio:'ARS'}];mixRenderAll();}
+    const total=mixGetMainTotal();
+    if(total>0)mixSetRowAmount(0,total);
+    calcMixTotal();
+  } else {
+    payAutoFillFromImporte();
+  }
+}
+
+// Auto-llena según importe y medio seleccionado
+function payAutoFillFromImporte(){
+  const medio=document.getElementById('ps-medio')?.value||'ARS';
+  if(medio==='MIX'){const t=mixGetMainTotal();if(t>0&&MIX_ROWS.length>0)mixSetRowAmount(0,t);calcMixTotal();return;}
+  if(medio==='CHQ'){calcPayTotal();return;}
+  const imp=moneyVal('wf-importe')||moneyVal('wf-total')||moneyVal('wf-neto')||0;
+  if(!imp){calcPayTotal();return;}
+  if(medio==='ARS'){setMoney('ps-ars',imp);payValidateARS();}
+  else if(medio==='USD'){
+    const tc=parseFloat(document.getElementById('ps-usd-tc')?.value)||SALDOS.tcBlue||CONFIG?.tc_blue||1450;
+    if(tc>0){const usdEl=document.getElementById('ps-usd-monto');if(usdEl)usdEl.value=(imp/tc).toFixed(2);setMoney('ps-usd-ars',imp);}
+    payValidateUSD();
+  }
+  calcPayTotal();
+}
+
+// ── MIXTO — estado y renderizado ─────────────────────────────
+let MIX_ROWS=[]; // [{medio:'ARS'|'USD'|'CHQ'}]
+
+function mixGetMainTotal(){return moneyVal('wf-importe')||moneyVal('wf-total')||moneyVal('wf-neto')||0;}
+
+function mixRenderAll(){
+  const c=document.getElementById('mix-rows-container');if(!c)return;
+  const tc=SALDOS.tcBlue||CONFIG?.tc_blue||1450;
+  const sARS=SALDOS.saldoARS||0,sUSD=SALDOS.posUSD||0,sChq=SALDOS.chequesEnCartera||0;
+  c.innerHTML=MIX_ROWS.map((row,i)=>{
+    let amtHtml='';
+    if(row.medio==='ARS')amtHtml=`<input class="field money" id="mix-ars-${i}" placeholder="$ 0" style="flex:1" oninput="mixAmountChanged(${i})">`;
+    else if(row.medio==='USD')amtHtml=`<div class="pay-usd-row" style="flex:1">
+      <input type="number" id="mix-usd-monto-${i}" placeholder="0.00" step="0.01" class="field" style="flex:1" oninput="mixCalcUSD(${i});mixAmountChanged(${i})">
+      <span class="pay-usd-sep">×</span>
+      <input type="number" id="mix-usd-tc-${i}" value="${tc}" class="field" style="width:72px" oninput="mixCalcUSD(${i})">
+      <span class="pay-usd-sep">=</span>
+      <input class="field money" id="mix-usd-ars-${i}" readonly placeholder="$ 0" style="flex:1;background:#f0fdf4;font-weight:700"></div>`;
+    else if(row.medio==='CHQ')amtHtml=`<div id="mix-chq-list-${i}" class="pay-chq-list" style="flex:1;min-width:140px"><div class="pay-chq-loading">Cargando...</div></div>`;
+    const avail=row.medio==='ARS'?`${fmtARS(sARS)} disp.`:row.medio==='USD'?`${sUSD.toFixed(2)} USD disp.`:`${fmtARS(sChq)} disp.`;
+    return `<div class="mix-row" id="mix-row-${i}">
+      <select class="field mix-medio-sel" id="mix-medio-${i}" onchange="mixMedioChanged(${i})" style="flex:0 0 140px;font-size:13px">
+        <option value="ARS" ${row.medio==='ARS'?'selected':''}>💵 Pesos ARS</option>
+        <option value="USD" ${row.medio==='USD'?'selected':''}>💰 Dólares</option>
+        <option value="CHQ" ${row.medio==='CHQ'?'selected':''}>📋 Cheque</option>
+      </select>
+      ${amtHtml}
+      <span class="mix-avail">${avail}</span>
+      ${i>0?`<button class="btn-ico danger mix-del" onclick="mixRemoveRow(${i})" title="Quitar"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>`:''}
+    </div>`;
+  }).join('');
+  // Cargar cheques para filas de tipo CHQ
+  MIX_ROWS.forEach((row,i)=>{if(row.medio==='CHQ')mixLoadCheques(i);});
+  const addBtn=document.getElementById('mix-add-btn');
+  if(addBtn)addBtn.style.display=MIX_ROWS.length>=4?'none':'';
+}
+
+function mixAddRow(){
+  if(MIX_ROWS.length>=4)return;
+  MIX_ROWS.push({medio:'ARS'});
+  mixRenderAll();
+  // Poner el resto en la nueva fila
+  const total=mixGetMainTotal();
+  let sum=0;for(let i=0;i<MIX_ROWS.length-1;i++)sum+=mixGetRowARS(i);
+  mixSetRowAmount(MIX_ROWS.length-1,Math.max(0,total-sum));
+  calcMixTotal();
+}
+
+function mixRemoveRow(idx){
+  MIX_ROWS.splice(idx,1);
+  mixRenderAll();
+  // Si queda 1 sola fila, poner el total completo
+  if(MIX_ROWS.length===1)mixSetRowAmount(0,mixGetMainTotal());
+  calcMixTotal();
+}
+
+function mixMedioChanged(idx){
+  MIX_ROWS[idx].medio=document.getElementById('mix-medio-'+idx)?.value||'ARS';
+  const prevAmt=mixGetRowARS(idx); // guardar monto antes de re-render
+  mixRenderAll();
+  // Restaurar monto si era ARS o USD
+  if(MIX_ROWS[idx].medio!=='CHQ')mixSetRowAmount(idx,prevAmt);
+  calcMixTotal();
+}
+
+// Cascade: cuando cambia el monto en fila idx, la siguiente recibe el resto
+function mixAmountChanged(idx){
+  const total=mixGetMainTotal();if(!total){calcMixTotal();return;}
+  let sum=0;for(let i=0;i<=idx;i++)sum+=mixGetRowARS(i);
+  const resto=Math.max(0,total-sum);
+  if(idx+1<MIX_ROWS.length)mixSetRowAmount(idx+1,resto);
+  calcMixTotal();
+}
+
+function mixCalcUSD(idx){
+  const monto=parseFloat(document.getElementById('mix-usd-monto-'+idx)?.value)||0;
+  const tc=parseFloat(document.getElementById('mix-usd-tc-'+idx)?.value)||0;
+  if(tc>0)setMoney('mix-usd-ars-'+idx,Math.round(monto*tc));
+}
+
+function mixGetRowARS(idx){
+  const m=MIX_ROWS[idx]?.medio||'ARS';
+  if(m==='ARS')return moneyVal('mix-ars-'+idx);
+  if(m==='USD')return moneyVal('mix-usd-ars-'+idx);
+  if(m==='CHQ'){let t=0;document.querySelectorAll('#mix-chq-list-'+idx+' input[type=checkbox]:checked').forEach(cb=>{t+=parseFloat(cb.dataset.importe)||0;});return t;}
+  return 0;
+}
+
+function mixSetRowAmount(idx,amount){
+  const m=MIX_ROWS[idx]?.medio||'ARS';
+  if(m==='ARS'){setMoney('mix-ars-'+idx,amount);}
+  else if(m==='USD'){
+    const tc=parseFloat(document.getElementById('mix-usd-tc-'+idx)?.value)||SALDOS.tcBlue||1450;
+    const usdEl=document.getElementById('mix-usd-monto-'+idx);
+    if(usdEl&&tc>0)usdEl.value=(amount/tc).toFixed(2);
+    setMoney('mix-usd-ars-'+idx,amount);
+  }
+  // CHQ: no se puede auto-setear, el usuario elige cheques
+}
+
+function mixLoadCheques(idx){
+  const list=document.getElementById('mix-chq-list-'+idx);if(!list)return;
+  google.script.run.withSuccessHandler(cheques=>{
+    if(!cheques.length){list.innerHTML='<div class="pay-chq-loading" style="color:var(--t3)">No hay cheques disponibles</div>';return;}
+    list.innerHTML=cheques.map(c=>`<label class="pay-chq-item">
+      <input type="checkbox" data-id="${c.id}" data-importe="${c.importe}" onchange="calcMixTotal()">
+      <div class="pay-chq-info"><strong>#${c.numero}</strong> · ${c.banco}
+        <span style="color:var(--t3)">${c.librador}${c.fecha_vto?' · '+c.fecha_vto:''}</span></div>
+      <strong class="pay-chq-amt">${fmtARS(c.importe)}</strong></label>`).join('');
+  }).getChequesDisponibles(ENTIDAD_ACTUAL);
+}
+
+function calcMixTotal(){
+  let total=0;MIX_ROWS.forEach((_,i)=>{total+=mixGetRowARS(i);});
+  const el=document.getElementById('ps-total');if(el)el.textContent=fmtARS(total);
+  const main=mixGetMainTotal(),difMsg=document.getElementById('ps-dif-msg');if(!difMsg)return;
+  if(main>0&&total>0){const d=main-total;
+    if(Math.abs(d)<1){difMsg.style.display='';difMsg.style.color='var(--ok)';difMsg.textContent='✓ Cubre el pago';}
+    else if(d>0){difMsg.style.display='';difMsg.style.color='var(--warn)';difMsg.textContent=`Faltan ${fmtARS(d)}`;}
+    else{difMsg.style.display='';difMsg.style.color='var(--t3)';difMsg.textContent=`Excede por ${fmtARS(-d)}`;}
+  }else difMsg.style.display='none';
+}
+function wzCalcARS(){const usd=parseFloat(document.getElementById('wf-musd')?.value)||0,tc=parseFloat(document.getElementById('wf-tc')?.value)||0;setMoney('wf-mars',Math.round(usd*tc));}
+function wzToggleUSD(label){const cb=label.querySelector('input');const extra=document.getElementById('wf-usd-extra');if(extra)extra.style.display=cb.checked?'':'none';}
+function calcParcialUSD(){const usd=parseFloat(document.getElementById('wf-pusd')?.value)||0,tc=parseFloat(document.getElementById('wf-ptc')?.value)||0;setMoney('wf-pars',Math.round(usd*tc));}
+
+// ── Payment source helpers ─────────────────────────────────────
+function payCalcUSD(){
+  const usd=parseFloat(document.getElementById('ps-usd-monto')?.value)||0;
+  const tc=parseFloat(document.getElementById('ps-usd-tc')?.value)||0;
+  setMoney('ps-usd-ars',Math.round(usd*tc));
+  calcPayTotal();
+}
+function payValidateARS(){
+  const v=moneyVal('ps-ars'), avail=SALDOS.saldoARS||0;
+  const errEl=document.getElementById('ps-ars-err');
+  const inp=document.getElementById('ps-ars');
+  const over=v>0&&v>avail;
+  if(errEl)errEl.style.display=over?'':'none';
+  if(inp)inp.style.borderColor=over?'var(--err)':'';
+}
+function payValidateUSD(){
+  const usd=parseFloat(document.getElementById('ps-usd-monto')?.value)||0;
+  const avail=SALDOS.posUSD||0;
+  const errEl=document.getElementById('ps-usd-err');
+  const inp=document.getElementById('ps-usd-monto');
+  const over=usd>0&&usd>avail;
+  if(errEl)errEl.style.display=over?'':'none';
+  if(inp)inp.style.borderColor=over?'var(--err)':'';
+}
+function payUpdateChequeSubtotal(){
+  let total=0;
+  document.querySelectorAll('input[name="ps-chq"]:checked').forEach(cb=>{total+=parseFloat(cb.dataset.importe)||0;});
+  const el=document.getElementById('ps-chq-total-val'); if(el)el.textContent=fmtARS(total);
+  const sub=document.getElementById('ps-chq-subtotal'); if(sub)sub.style.display=total>0?'':'none';
+}
+function calcPayTotal(){
+  const ars=moneyVal('ps-ars');
+  const usdARS=moneyVal('ps-usd-ars');
+  let chqTotal=0;
+  document.querySelectorAll('input[name="ps-chq"]:checked').forEach(cb=>{chqTotal+=parseFloat(cb.dataset.importe)||0;});
+  payUpdateChequeSubtotal();
+  const total=ars+usdARS+chqTotal;
+  const el=document.getElementById('ps-total'); if(el)el.textContent=fmtARS(total);
+  // Comparar contra el monto a pagar
+  const imp=moneyVal('wf-importe')||moneyVal('wf-total')||moneyVal('wf-neto')||0;
+  const difMsg=document.getElementById('ps-dif-msg'); if(!difMsg)return;
+  if(imp>0&&total>0){
+    const dif=imp-total;
+    if(Math.abs(dif)<1){difMsg.style.display='';difMsg.style.color='var(--ok)';difMsg.textContent='✓ Cubre el monto';}
+    else if(dif>0){difMsg.style.display='';difMsg.style.color='var(--warn)';difMsg.textContent=`Faltan ${fmtARS(dif)}`;}
+    else{difMsg.style.display='';difMsg.style.color='var(--t3)';difMsg.textContent=`Excede por ${fmtARS(-dif)}`;}
+  }else difMsg.style.display='none';
+}
+// Compatibilidad con código viejo
+function togglePayUSD(cb){const f=document.getElementById('ps-usd-fields');if(f)f.style.display=cb.checked?'':'none';}
+function togglePayCheques(cb){}
+function calcPayUSD(){payCalcUSD();}  // alias
+
+function _getPaymentSources(){
+  const medio=document.getElementById('ps-medio')?.value||'ARS';
+
+  if(medio==='MIX'){
+    const mix=[];
+    MIX_ROWS.forEach((row,i)=>{
+      if(row.medio==='ARS'){const ars=moneyVal('mix-ars-'+i);if(ars>0)mix.push({medio:'ARS',ars});}
+      else if(row.medio==='USD'){
+        const usd=parseFloat(document.getElementById('mix-usd-monto-'+i)?.value)||0;
+        const tc=parseFloat(document.getElementById('mix-usd-tc-'+i)?.value)||0;
+        if(usd>0&&tc>0)mix.push({medio:'USD',usd,tc,ars:Math.round(usd*tc)});
+      }
+      else if(row.medio==='CHQ'){
+        const chqs=[];document.querySelectorAll('#mix-chq-list-'+i+' input[type=checkbox]:checked').forEach(cb=>{chqs.push({id:cb.dataset.id,importe:parseFloat(cb.dataset.importe)||0});});
+        if(chqs.length)mix.push({medio:'CHQ',cheques:chqs});
+      }
+    });
+    return mix.length?{mix}:null;
+  }
+
+  // Método único
+  const ps={};
+  if(medio==='ARS'){const ars=moneyVal('ps-ars');if(ars>0)ps.ars=ars;}
+  else if(medio==='USD'){const usd=parseFloat(document.getElementById('ps-usd-monto')?.value)||0;const tc=parseFloat(document.getElementById('ps-usd-tc')?.value)||0;if(usd>0&&tc>0)ps.usd={monto_usd:usd,tc};}
+  // CHQ: los cheques se guardan a través del concepto cobro_cheque
+  return Object.keys(ps).length?ps:null;
+}
+
+function wzGuardar(){
+  const hoy=document.getElementById('wf-fecha')?.value;
+  const entidad=document.getElementById('wf-entidad')?.value||'AGA';
+  const obs=document.getElementById('wf-obs')?.value||'';
+  const mdp=document.getElementById('wf-medio')?.value||'';
+  let data={tipo:WZ.concepto, fecha:hoy, entidad, observacion:obs, medio_pago:mdp, debe:0, haber:0};
+
+  try{
+    if(WZ.concepto==='venta_auto'){
+      const idVeh=document.getElementById('wf-vehiculo').value;
+      if(!idVeh){toast('Seleccioná un vehículo','err');return;}
+      const precio=moneyVal('wf-precio'); if(!precio){toast('Ingresá el precio de venta','err');return;}
+      const comprador=document.getElementById('wf-comprador').value;
+      if(!comprador){toast('Ingresá el comprador','err');return;}
+      // Parte de pago con auto (punto 3)
+      const usaVehPago=document.getElementById('wf-veh-toggle')?.checked;
+      const idAutoPartePago=usaVehPago?document.getElementById('wf-auto-parte')?.value:'';
+      const vehiculo_entrega=usaVehPago?moneyVal('wf-veh'):0;
+      if(usaVehPago&&!idAutoPartePago){toast('Seleccioná el auto de parte de pago','err');return;}
+      const vehParteLabel=usaVehPago?document.getElementById('wf-auto-parte').options[document.getElementById('wf-auto-parte').selectedIndex]?.text:'';
+      if(!showConfirm(`¿Confirmar venta?`,
+        `Vehículo: ${document.getElementById('wf-vehiculo').options[document.getElementById('wf-vehiculo').selectedIndex]?.text}<br>Comprador: <strong>${comprador}</strong><br>Precio: <strong>${fmtARS(precio)}</strong>${usaVehPago?`<br>Parte de pago: ${vehParteLabel} · ${fmtARS(vehiculo_entrega)}`:''}`,
+        'Confirmar venta',()=>{
+          const tc_dia=parseFloat(document.getElementById('wf-tc-dia')?.value)||0;
+          const d2={...data,id_vehiculo:idVeh,precio_venta:precio,comprador,
+            vendedor:document.getElementById('wf-vendedor').value,
+            efectivo:moneyVal('wf-ef'),vehiculo_entrega,
+            id_auto_parte_pago:idAutoPartePago||null,
+            financiacion:moneyVal('wf-fin'),tc_dia,debe:precio,
+            detalle:`Venta auto — ${document.getElementById('wf-vehiculo').options[document.getElementById('wf-vehiculo').selectedIndex]?.text}`,
+            concepto:'Venta Auto'};
+          const ps=_getPaymentSources(); if(ps)d2.payment_sources=ps;
+          d2.entidad=document.getElementById('wf-entidad')?.value||ENTIDAD_ACTUAL;
+          const btn=document.getElementById('wz-guardar'); btn.disabled=true; btn.textContent='Guardando...';
+          google.script.run.withSuccessHandler(r=>{
+            if(r.ok){cerrarModal();toast(`Venta registrada · Ganancia: ${fmtARS(r.ganancia||0)}`,'ok');loadMovimientos();loadBalances();dashLoaded=false;}
+            else{toast(r.error||'Error','err');btn.disabled=false;btn.textContent='Guardar movimiento';}
+          }).withFailureHandler(()=>{toast('Error','err');btn.disabled=false;btn.textContent='Guardar movimiento';})
+          .saveMovimientoCajaCompleto(d2);
+        },'warn')) return;
+      return; // showConfirm es async, el guardado se hace en el callback
+    }
+    else if(WZ.concepto==='gasto_auto'){
+      const idVeh=document.getElementById('wf-vehiculo').value; if(!idVeh){toast('Seleccioná un vehículo','err');return;}
+      const imp=moneyVal('wf-importe'); if(!imp){toast('Ingresá el importe','err');return;}
+      const desc=document.getElementById('wf-desc').value; if(!desc){toast('Ingresá una descripción','err');return;}
+      Object.assign(data,{id_vehiculo:idVeh,categoria:document.getElementById('wf-cat-gv').value,
+        descripcion:desc,proveedor:document.getElementById('wf-prov').value,haber:imp,
+        detalle:`${document.getElementById('wf-cat-gv').value}: ${desc}`,concepto:'Reparación Vehículo'});
+    }
+    else if(WZ.concepto==='gasto_agencia'){
+      const prov=document.getElementById('wf-prov-ga').value; if(!prov){toast('Ingresá el proveedor','err');return;}
+      const neto=moneyVal('wf-neto'); if(!neto){toast('Ingresá el neto','err');return;}
+      const total=moneyVal('wf-total')||neto;
+      Object.assign(data,{categoria:document.getElementById('wf-cat-ga').value,
+        tipo:document.getElementById('wf-tipo-ga').value,proveedor:prov,
+        descripcion:document.getElementById('wf-desc-ga').value,
+        neto,iva:moneyVal('wf-iva'),total,canal:document.getElementById('wf-canal').value,
+        haber:total,detalle:`${document.getElementById('wf-cat-ga').value}: ${prov}`,concepto:document.getElementById('wf-cat-ga').value});
+    }
+    else if(WZ.concepto==='cobro_cheque'||WZ.concepto==='pago_cheque'){
+      const imp=moneyVal('wf-chq-importe'); if(!imp){toast('Ingresá el importe del cheque','err');return;}
+      const vto=document.getElementById('wf-vto').value; if(!vto){toast('Ingresá la fecha de vencimiento','err');return;}
+      const esC=WZ.concepto==='cobro_cheque';
+      Object.assign(data,{numero:document.getElementById('wf-chq-num').value,banco:document.getElementById('wf-banco').value,
+        librador:document.getElementById('wf-librador').value,beneficiario:document.getElementById('wf-librador').value,
+        importe:imp,fecha_vto:vto,fecha_emision:hoy,
+        debe:esC?imp:0,haber:esC?0:imp,
+        detalle:`${esC?'Cobro':'Pago'} cheque #${document.getElementById('wf-chq-num').value||'?'}`,
+        concepto:esC?'Cobro Cheque':'Pago Cheque'});
+    }
+    else if(WZ.concepto==='venta_usd'||WZ.concepto==='compra_usd'){
+      const usd=parseFloat(document.getElementById('wf-musd').value)||0; if(!usd){toast('Ingresá el monto en USD','err');return;}
+      const tc=parseFloat(document.getElementById('wf-tc').value)||0; if(!tc){toast('Ingresá el tipo de cambio','err');return;}
+      const ars=moneyVal('wf-mars')||Math.round(usd*tc); const esV=WZ.concepto==='venta_usd';
+      Object.assign(data,{monto_usd:usd,tc,monto_ars:ars,tc_dia:tc,
+        contraparte:document.getElementById('wf-contraparte').value,
+        debe:esV?ars:0,haber:esV?0:ars,
+        detalle:`${esV?'Venta':'Compra'} USD ${usd} × ${fmt(tc)}`,concepto:esV?'Venta USD':'Compra USD'});
+    }
+    else if(WZ.concepto==='reg_usd_ing'||WZ.concepto==='reg_usd_eg'){
+      const usd=parseFloat(document.getElementById('wf-musd').value)||0; if(!usd){toast('Ingresá el monto en USD','err');return;}
+      const tc=parseFloat(document.getElementById('wf-tc').value)||0; if(!tc){toast('Ingresá el TC','err');return;}
+      const ars=moneyVal('wf-mars')||Math.round(usd*tc); const esIng=WZ.concepto==='reg_usd_ing';
+      const desc=document.getElementById('wf-desc-gen')?.value||'';
+      Object.assign(data,{monto_usd:usd,tc,monto_ars:ars,tc_dia:tc,
+        contraparte:document.getElementById('wf-contraparte')?.value||'',
+        debe:esIng?ars:0,haber:esIng?0:ars,
+        detalle:desc||(esIng?`Cobro en USD ${usd}`:`Pago en USD ${usd}`),
+        concepto:esIng?'Cobro USD':'Pago USD'});
+    }
+    else if(WZ.concepto==='compra_auto'){
+      const imp=moneyVal('wf-importe'); if(!imp){toast('Ingresá el precio de compra','err');return;}
+      const dominio=(document.getElementById('wf-dominio')?.value||'').toUpperCase().trim();
+      if(!dominio){toast('Ingresá el dominio','err');return;}
+      const marca=document.getElementById('wf-marca')?.value; if(!marca){toast('Seleccioná la marca','err');return;}
+      const modelo=document.getElementById('wf-modelo')?.value||''; if(!modelo){toast('Ingresá el modelo','err');return;}
+      const anio=parseInt(document.getElementById('wf-anio')?.value)||0; if(!anio){toast('Ingresá el año','err');return;}
+      const tipo=document.getElementById('wf-tipo-veh')?.value||'Usado';
+      const precioTabla=moneyVal('wf-precio-tabla')||0;
+      const exDueno=document.getElementById('wf-exdueno')?.value||'';
+      const descAuto=`Compra ${marca} ${modelo} ${anio} (${dominio})`;
+      // First create the vehicle record, then the caja entry
+      const vehData={dominio,marca,modelo:modelo,anio,tipo,precio_toma:imp,precio_tabla:precioTabla,
+        markup_consigna:tipo==='Consigna'?1.30:0,
+        ex_dueno_nombre:exDueno,fecha_ingreso:hoy,registrar_caja:false};
+      Object.assign(data,{haber:imp,debe:0,detalle:descAuto,concepto:'Compra Auto',
+        _veh_data:vehData}); // _veh_data handled specially below
+    }
+    else{
+      const imp=moneyVal('wf-importe'); if(!imp){toast('Ingresá el importe','err');return;}
+      const desc=document.getElementById('wf-desc-gen')?.value||'';
+      if(!desc){toast('Ingresá una descripción','err');return;}
+      const esIng=WZ.tipo==='ingreso';
+      Object.assign(data,{debe:esIng?imp:0,haber:esIng?0:imp,detalle:desc,concepto:desc});
+    }
+
+    // Parte en USD (opcional, cualquier movimiento)
+    const usdToggle=document.getElementById('wf-usd-toggle');
+    if(usdToggle?.checked){
+      const pusd=parseFloat(document.getElementById('wf-pusd')?.value)||0;
+      const ptc=parseFloat(document.getElementById('wf-ptc')?.value)||0;
+      if(pusd&&ptc){data.usd_monto=pusd;data.usd_tc=ptc;}
+    }
+
+    // Entidad (AGA o Martin)
+    data.entidad = document.getElementById('wf-entidad')?.value || ENTIDAD_ACTUAL;
+
+    // Payment sources (origen del pago para egresos)
+    const payS = _getPaymentSources();
+    if(payS) data.payment_sources = payS;
+
+    const btn=document.getElementById('wz-guardar'); btn.disabled=true; btn.textContent='Guardando...';
+
+    // compra_auto: primero crear el vehículo, luego el movimiento de caja
+    if(data._veh_data){
+      const vehData = data._veh_data; delete data._veh_data;
+      google.script.run
+        .withSuccessHandler(vehR=>{
+          if(!vehR?.ok){toast(vehR?.error||'Error creando el vehículo','err');btn.disabled=false;btn.textContent='Guardar movimiento';return;}
+          data.referencia=`VEH:${vehR.id}`;
+          google.script.run
+            .withSuccessHandler(r=>{
+              if(r.ok){cerrarModal();toast(`Auto registrado en inventario y caja actualizada`,'ok');loadMovimientos();loadBalances();dashLoaded=false;loadInventario(INV_FILTRO);}
+              else{toast(r.error||'Error al guardar caja','err');btn.disabled=false;btn.textContent='Guardar movimiento';}
+            })
+            .withFailureHandler(()=>{toast('Error','err');btn.disabled=false;btn.textContent='Guardar movimiento';})
+            .saveMovimientoCajaCompleto(data);
+        })
+        .withFailureHandler(()=>{toast('Error al crear vehículo','err');btn.disabled=false;btn.textContent='Guardar movimiento';})
+        .saveVehiculo(vehData);
+      return;
+    }
+
+    google.script.run
+      .withSuccessHandler(r=>{
+        if(r.ok){
+          cerrarModal();
+          const msgs={venta_auto:`Venta registrada · Ganancia: ${fmtARS(r.ganancia||0)}`,gasto_auto:'Gasto en vehículo guardado',gasto_agencia:'Gasto de agencia guardado',cobro_cheque:'Cheque en cartera',pago_cheque:'Cheque emitido',venta_usd:'Venta USD registrada',compra_usd:'Compra USD registrada',reg_usd_ing:'Cobro en USD registrado',reg_usd_eg:'Pago en USD registrado'};
+          toast(msgs[WZ.concepto]||'Movimiento guardado','ok');
+          loadMovimientos();loadBalances();dashLoaded=false;
+          if(WZ.concepto==='cobro_cheque'||WZ.concepto==='pago_cheque'||(payS?.cheques||payS?.mix?.some(m=>m.medio==='CHQ'))) loadCheques('');
+          if(WZ.concepto==='venta_usd'||WZ.concepto==='compra_usd'||(payS?.usd||payS?.mix?.some(m=>m.medio==='USD'))) setTimeout(()=>loadDolares(),200);
+        }else{toast(r.error||'Error al guardar','err');btn.disabled=false;btn.textContent='Guardar movimiento';}
+      })
+      .withFailureHandler(e=>{toast('Error','err');btn.disabled=false;btn.textContent='Guardar movimiento';})
+      .saveMovimientoCajaCompleto(data);
+  }catch(err){toast('Error: '+err.message,'err');}
+}
+
+// Autocomplete
+function acBuscar(input,listId){const q=input.value;const list=document.getElementById(listId);if(q.length<2){list.style.display='none';return;}google.script.run.withSuccessHandler(r=>{if(!r.length){list.style.display='none';return;}list.style.display='';list.innerHTML=r.map(n=>`<div class="ac-item" onclick="acSelect('${input.id}','${listId}','${n.replace(/'/g,"\\'")}')">${n}</div>`).join('');}).buscarPersonas(q);}
+function acSelect(inputId,listId,val){document.getElementById(inputId).value=val;document.getElementById(listId).style.display='none';}
+
+// ══════════════════════════════════════════════════
+//  CONFIG PAGE
+// ══════════════════════════════════════════════════
+function initConfigPage(){
+  const cfg=UI_CFG;
+  if(cfg.accent){document.getElementById('cfg-accent').value=cfg.accent;document.documentElement.style.setProperty('--accent',cfg.accent);}
+  if(cfg.brand){document.getElementById('cfg-brand').value=cfg.brand;document.documentElement.style.setProperty('--brand',cfg.brand);}
+  if(cfg.fontSize){const el=document.getElementById('font-size-val');if(el)el.textContent=cfg.fontSize+'px';document.documentElement.style.setProperty('--fs',cfg.fontSize+'px');}
+  if(cfg.font){const el=document.getElementById('cfg-font');if(el)el.value=cfg.font;}
+  if(cfg.radius){const el=document.getElementById('cfg-radius');if(el)el.value=cfg.radius;document.documentElement.style.setProperty('--r',cfg.radius+'px');document.documentElement.style.setProperty('--rs',Math.max(0,cfg.radius-4)+'px');}
+  // Column toggles
+  document.querySelectorAll('.col-toggle input').forEach(cb=>{
+    const table=cb.dataset.table,col=cb.dataset.col;
+    const key=`cols_${table}`;
+    if(UI_CFG[key]&&UI_CFG[key][col]===false) cb.checked=false;
+  });
+}
+function applyStoredUI(){
+  const cfg=UI_CFG;
+  if(cfg.accent) document.documentElement.style.setProperty('--accent',cfg.accent);
+  if(cfg.brand)  document.documentElement.style.setProperty('--brand',cfg.brand);
+  if(cfg.fontSize) document.documentElement.style.setProperty('--fs',cfg.fontSize+'px');
+  if(cfg.radius){document.documentElement.style.setProperty('--r',cfg.radius+'px');document.documentElement.style.setProperty('--rs',Math.max(0,cfg.radius-4)+'px');}
+  if(cfg.font) document.documentElement.style.setProperty('--font',cfg.font);
+}
+function applyPreset(btn){
+  document.querySelectorAll('.preset-btn').forEach(b=>b.classList.remove('active'));btn.classList.add('active');
+  const accent=btn.dataset.accent,brand=btn.dataset.brand;
+  document.getElementById('cfg-accent').value=accent;document.getElementById('cfg-brand').value=brand;
+  previewColor(accent);previewBrand(brand);
+}
+function previewColor(v){document.documentElement.style.setProperty('--accent',v);document.documentElement.style.setProperty('--accent-l',v+'22');}
+function previewBrand(v){document.documentElement.style.setProperty('--brand',v);}
+let _curFontSize=parseInt(UI_CFG.fontSize)||14;
+function changeFontSize(d){_curFontSize=Math.max(12,Math.min(18,_curFontSize+d));document.documentElement.style.setProperty('--fs',_curFontSize+'px');document.getElementById('font-size-val').textContent=_curFontSize+'px';}
+function applyFont(v){document.documentElement.style.setProperty('--font',v);}
+function applyRadius(v){document.documentElement.style.setProperty('--r',v+'px');document.documentElement.style.setProperty('--rs',Math.max(0,parseInt(v)-4)+'px');}
+
+function guardarConfig(){
+  const cols_inv={},cols_caja={};
+  document.querySelectorAll('.col-toggle input[data-table=inv]').forEach(cb=>{cols_inv[cb.dataset.col]=cb.checked;});
+  document.querySelectorAll('.col-toggle input[data-table=caja]').forEach(cb=>{cols_caja[cb.dataset.col]=cb.checked;});
+  UI_CFG={
+    accent:document.getElementById('cfg-accent').value,
+    brand:document.getElementById('cfg-brand').value,
+    fontSize:_curFontSize,
+    font:document.getElementById('cfg-font').value,
+    radius:parseInt(document.getElementById('cfg-radius').value),
+    cols_inv,cols_caja
+  };
+  localStorage.setItem('aga_ui',JSON.stringify(UI_CFG));
+  applyStoredUI();
+  toast('Configuración guardada','ok');
+}
+
+// ══════════════════════════════════════════════════
+//  REPORTES — PASO 6
+// ══════════════════════════════════════════════════
+let _reporteLoaded = null;
+function loadReportes() {
+  const selMes = document.getElementById('rep-mes');
+  const selAnio = document.getElementById('rep-anio');
+  if (!selMes) return;
+  const mes = selMes.value, anio = selAnio.value;
+  if (_reporteLoaded === mes+anio) return;
+  _reporteLoaded = mes+anio;
+  document.getElementById('rep-body').innerHTML = `<div style="text-align:center;padding:60px;color:var(--t3)">Calculando...</div>`;
+  google.script.run.withSuccessHandler(renderReporte).withFailureHandler(()=>toast('Error al cargar','err')).getReporteMensual(mes,anio);
+}
+function recargarReporte(){ _reporteLoaded=null; loadReportes(); }
+
+function renderReporte(d) {
+  if (!d?.ok) { document.getElementById('rep-body').innerHTML=`<p style="color:var(--err);padding:20px">Error: ${d?.error||'Desconocido'}</p>`; return; }
+  const delta = d.resultado-d.prev_neto, deltaSign = delta>=0?'+':'';
+  const pctDelta = d.prev_neto?Math.abs(((delta/d.prev_neto)*100)).toFixed(0):'—';
+  const tiposHtml = Object.entries(d.ventas.porTipo||{}).map(([t,v])=>`
+    <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid #f3f4f6">
+      <span class="badge badge-${t.toLowerCase()}">${t}</span>
+      <span style="font-size:12px;color:var(--t2)">${v.count} auto${v.count!==1?'s':''}</span>
+      <span style="font-size:13px;font-weight:600">${fmtARS(v.ganancia)}</span>
+    </div>`).join('');
+  const gastoCats = Object.entries(d.gastosAgencia.porCategoria||{})
+    .sort(([,a],[,b])=>b-a);
+  const gastoRows = gastoCats.map(([cat,total])=>{
+    const pctG = d.gastosAgencia.total?((total/d.gastosAgencia.total)*100).toFixed(0):0;
+    return `<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid #f3f4f6">
+      <span style="flex:1;font-size:13px">${cat}</span>
+      <div style="width:80px;background:#f3f4f6;border-radius:4px;height:6px;overflow:hidden"><div style="width:${pctG}%;background:var(--err);height:100%;border-radius:4px"></div></div>
+      <span style="font-size:11px;color:var(--t3);width:30px;text-align:right">${pctG}%</span>
+      <span style="font-size:13px;font-weight:600;width:90px;text-align:right">${fmtARS(total)}</span>
+    </div>`;}).join('');
+
+  document.getElementById('rep-body').innerHTML = `
+    <!-- KPIs Row 1 -->
+    <div class="rep-kpis">
+      <div class="rep-kpi"><div class="rep-kpi-lbl">Ventas</div><div class="rep-kpi-val">${d.ventas.count}</div><div class="rep-kpi-sub">autos vendidos</div></div>
+      <div class="rep-kpi"><div class="rep-kpi-lbl">Ingresos brutos</div><div class="rep-kpi-val" style="color:var(--ok)">${fmtARS(d.ventas.total)}</div><div class="rep-kpi-sub">precio total de ventas</div></div>
+      <div class="rep-kpi"><div class="rep-kpi-lbl">Ganancia bruta</div><div class="rep-kpi-val" style="color:var(--accent)">${fmtARS(d.ventas.ganancia)}</div><div class="rep-kpi-sub">margen ${d.ventas.margen}% sobre costo</div></div>
+      <div class="rep-kpi"><div class="rep-kpi-lbl">Gastos agencia</div><div class="rep-kpi-val" style="color:var(--err)">${fmtARS(d.gastosAgencia.total)}</div><div class="rep-kpi-sub">${d.gastosAgencia.count} comprobantes</div></div>
+      <div class="rep-kpi rep-kpi-resultado ${d.resultado>=0?'pos':'neg'}">
+        <div class="rep-kpi-lbl">Resultado neto</div>
+        <div class="rep-kpi-val">${fmtARS(d.resultado)}</div>
+        <div class="rep-kpi-sub">${delta!==0?`${deltaSign}${fmtARS(delta)} vs mes ant. (${deltaSign}${pctDelta}%)`:'Sin comparación'}</div>
+      </div>
+    </div>
+
+    <!-- KPIs Row 2 — Indicadores operativos -->
+    <div class="rep-kpis" style="margin-top:10px">
+      <div class="rep-kpi">
+        <div class="rep-kpi-lbl">🏷️ Costo de comercialización</div>
+        <div class="rep-kpi-val" style="color:var(--warn)">${d.costoComercializacion!==null?fmtARS(d.costoComercializacion):'—'}</div>
+        <div class="rep-kpi-sub">por auto vendido · gastos agencia ÷ ventas</div>
+      </div>
+      <div class="rep-kpi">
+        <div class="rep-kpi-lbl">🔄 Rotación de stock</div>
+        <div class="rep-kpi-val" style="color:var(--accent)">${d.rotacionDias!==null?d.rotacionDias+'d':'—'}</div>
+        <div class="rep-kpi-sub">promedio días en stock antes de venderse</div>
+      </div>
+      <div class="rep-kpi">
+        <div class="rep-kpi-lbl">📦 Stock actual</div>
+        <div class="rep-kpi-val">${d.stockCount}</div>
+        <div class="rep-kpi-sub">autos en inventario · ${fmtARS(d.stockValue)} en costo</div>
+      </div>
+      <div class="rep-kpi">
+        <div class="rep-kpi-lbl">💵 Precio prom. venta</div>
+        <div class="rep-kpi-val">${d.ventas.count?fmtARS(d.ventas.promPrecio):'—'}</div>
+        <div class="rep-kpi-sub">precio promedio del período</div>
+      </div>
+      <div class="rep-kpi">
+        <div class="rep-kpi-lbl">💰 Posición USD</div>
+        <div class="rep-kpi-val" style="color:${d.posUSD>=0?'var(--ok)':'var(--err)'}">${d.posUSD>=0?'+':''}${d.posUSD.toFixed(2)} USD</div>
+        <div class="rep-kpi-sub">posición neta acumulada en dólares</div>
+      </div>
+    </div>
+
+    <div class="rep-grid">
+      <!-- Ventas por tipo -->
+      <div class="rep-card">
+        <h3 class="rep-card-title">Ventas por tipo de vehículo</h3>
+        ${tiposHtml||`<p style="color:var(--t3);font-size:13px;text-align:center;padding:20px 0">Sin ventas en el período</p>`}
+        ${d.ventas.count?`<div style="display:flex;justify-content:space-between;padding:8px 0;margin-top:4px;font-weight:600;font-size:13px"><span>Total</span><span>${fmtARS(d.ventas.ganancia)}</span></div>`:''}
+      </div>
+
+      <!-- Gastos por categoría -->
+      <div class="rep-card">
+        <h3 class="rep-card-title">Gastos de agencia por categoría</h3>
+        ${gastoRows||`<p style="color:var(--t3);font-size:13px;text-align:center;padding:20px 0">Sin gastos en el período</p>`}
+        ${d.gastosAgencia.total?`<div style="display:flex;justify-content:space-between;padding:8px 0;margin-top:4px;font-weight:600;font-size:13px"><span>Total</span><span style="color:var(--err)">${fmtARS(d.gastosAgencia.total)}</span></div>`:''}
+      </div>
+
+      <!-- Ventas del mes -->
+      <div class="rep-card" style="grid-column:1/-1">
+        <h3 class="rep-card-title">Detalle de ventas</h3>
+        ${!d.ventas.lista?.length?`<p style="color:var(--t3);font-size:13px;text-align:center;padding:20px 0">Sin ventas en el período</p>`:
+        `<table class="data-table"><thead><tr><th>Fecha</th><th>Vehículo</th><th>Comprador</th><th class="num">Precio</th><th class="num">Costo</th><th class="num" style="color:var(--ok)">Ganancia</th><th class="num">Margen</th></tr></thead><tbody>
+        ${d.ventas.lista.map(v=>`<tr class="no-click"><td style="font-size:12px">${v.fecha}</td><td><strong>${v.vehiculo}</strong></td><td style="font-size:12px">${v.comprador||'—'}</td>
+        <td class="num">${fmtARS(v.precio)}</td><td class="num" style="color:var(--t3)">${fmtARS(v.costo)}</td>
+        <td class="num" style="color:var(--ok);font-weight:600">+${fmtARS(v.ganancia)}</td>
+        <td class="num" style="color:var(--t3)">${v.margen}%</td></tr>`).join('')}
+        </tbody></table>`}
+      </div>
+
+      <!-- Balance de caja -->
+      <div class="rep-card">
+        <h3 class="rep-card-title">Flujo de caja del mes</h3>
+        <div style="display:flex;flex-direction:column;gap:8px">
+          <div style="display:flex;justify-content:space-between;font-size:14px"><span style="color:var(--t2)">Total ingresos</span><span style="color:var(--ok);font-weight:600">+${fmtARS(d.cajaDebe)}</span></div>
+          <div style="display:flex;justify-content:space-between;font-size:14px"><span style="color:var(--t2)">Total egresos</span><span style="color:var(--err);font-weight:600">-${fmtARS(d.cajaHaber)}</span></div>
+          <div style="border-top:2px solid var(--bord);padding-top:8px;display:flex;justify-content:space-between;font-size:15px;font-weight:700"><span>Flujo neto</span><span style="color:${d.cajaDebe-d.cajaHaber>=0?'var(--ok)':'var(--err)'}">${fmtARS(d.cajaDebe-d.cajaHaber)}</span></div>
+        </div>
+      </div>
+
+      <!-- Posición USD -->
+      <div class="rep-card">
+        <h3 class="rep-card-title">Posición en dólares</h3>
+        <div style="text-align:center;padding:16px 0">
+          <div style="font-size:32px;font-weight:700;color:${d.posUSD>=0?'var(--ok)':'var(--err)'}">${d.posUSD>=0?'+':''}${d.posUSD.toFixed(2)} USD</div>
+          <div style="font-size:12px;color:var(--t3);margin-top:4px">posición neta acumulada</div>
+        </div>
+      </div>
+    </div>`;
+}
+
+// ══════════════════════════════════════════════════
+//  MODAL HELPERS
+// ══════════════════════════════════════════════════
+//  MODAL HELPERS
+// ══════════════════════════════════════════════════
+function abrirModal(){document.getElementById('modal-overlay').classList.add('open');document.body.style.overflow='hidden';}
+function cerrarModal(){document.getElementById('modal-overlay').classList.remove('open');document.body.style.overflow='';}
+
+// ══════════════════════════════════════════════════
+//  UTILS
+// ══════════════════════════════════════════════════
+function fmtARS(n){if(n===null||n===undefined)return'—';const v=Number(n);if(v>=1e6)return'$ '+(v/1e6).toFixed(1)+'M';if(v>=1e3)return'$ '+Math.round(v/1e3)+'K';return'$ '+fmt(v);}
+function fmt(n){return new Intl.NumberFormat('es-AR').format(Math.round(n));}
+function pct(a,b){return b?((a/b)*100).toFixed(1):'—';}
+function cap(s){return s?s.charAt(0).toUpperCase()+s.slice(1):s;}
+function isoDate(d){if(!d)return'';const p=d.split('/');return p.length===3?`${p[2]}-${p[1].padStart(2,'0')}-${p[0].padStart(2,'0')}`:d;}
+function toast(msg,type){const t=document.getElementById('toast');t.textContent=msg;t.className='show '+(type||'');clearTimeout(t._t);t._t=setTimeout(()=>t.className='',3500);}
+</script>
