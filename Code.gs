@@ -35,14 +35,18 @@ function getUserInfo() { return getUserInfo_(); }
 function getDashboardData() {
   try {
     const now = new Date(), fom = new Date(now.getFullYear(), now.getMonth(), 1);
-    let enStock = 0, reservados = 0, consignas = 0;
+    let enStock = 0, reservados = 0, consignas = 0, consignasMartin = 0;
     const vSh = SS.getSheetByName('VEHICULOS');
     if (vSh && vSh.getLastRow() > 1)
       vSh.getRange(2,1,vSh.getLastRow()-1,16).getValues().forEach(r => {
         if (!r[0] || r[6]==='Eliminado') return;
         if (r[6]==='Stock') enStock++;
         if (r[6]==='Reservado') reservados++;
-        if (r[5]==='Consigna' && r[6]!=='Vendido') consignas++;
+        if (r[5]==='Consigna' && r[6]!=='Vendido'){
+          consignas++;
+          // ex_dueno_nombre='Martin' indica que es auto de Martín
+          if(String(r[11]||'').toLowerCase().includes('martin')) consignasMartin++;
+        }
       });
     let ventasMes = 0, gananciaMes = 0; const ventasRecientes = [];
     const vtSh = SS.getSheetByName('VENTAS');
@@ -74,7 +78,7 @@ function getDashboardData() {
     SS.getSheetByName('CONFIG')?.getDataRange().getValues().forEach(r=>{
       if(r[0]==='tc_blue') tcBlue=r[1]; if(r[0]==='tc_oficial') tcOficial=r[1];
     });
-    return {ok:true,enStock,reservados,consignas,ventasMes,gananciaMes,saldoCaja,
+    return {ok:true,enStock,reservados,consignas,consignasMartin,ventasMes,gananciaMes,saldoCaja,
       chequesPorVencer,tcBlue,tcOficial,ventasRecientes,
       mes:Utilities.formatDate(now,'America/Argentina/Buenos_Aires','MMMM yyyy')};
   } catch(e){ return {ok:false,error:e.message}; }
@@ -156,9 +160,21 @@ function getVehiculosDisponibles() {
 function getTodosVehiculos() {
   try {
     const sh = SS.getSheetByName('VEHICULOS'); if(!sh||sh.getLastRow()<2) return [];
-    return sh.getRange(2,1,sh.getLastRow()-1,10).getValues()
+    return sh.getRange(2,1,sh.getLastRow()-1,12).getValues()
       .filter(r=>r[0]&&r[6]!=='Eliminado'&&r[6]!=='Vendido')
       .map(r=>({id:r[0],dominio:r[1],marca:r[2],modelo:r[3],anio:r[4],tipo:r[5],costo_total:Number(r[9])||0,
+        ex_dueno_nombre:r[11]||'',
+        label:`${r[1]} — ${r[2]} ${r[3]} ${r[4]}`}));
+  } catch(e){ return []; }
+}
+// Solo los autos de Martín (para venta con entidad=Martin)
+function getVehiculosMartin() {
+  try {
+    const sh = SS.getSheetByName('VEHICULOS'); if(!sh||sh.getLastRow()<2) return [];
+    return sh.getRange(2,1,sh.getLastRow()-1,12).getValues()
+      .filter(r=>r[0]&&r[6]!=='Eliminado'&&r[6]!=='Vendido'&&String(r[11]||'').toLowerCase().includes('martin'))
+      .map(r=>({id:r[0],dominio:r[1],marca:r[2],modelo:r[3],anio:r[4],tipo:r[5],costo_total:Number(r[9])||0,
+        ex_dueno_nombre:r[11]||'',
         label:`${r[1]} — ${r[2]} ${r[3]} ${r[4]}`}));
   } catch(e){ return []; }
 }
@@ -251,13 +267,13 @@ function saveGastoVehiculo(data) {
       data.id=_id('GV');
       const vSh=SS.getSheetByName('VEHICULOS');
       const vr=vSh.getRange(2,1,vSh.getLastRow()-1,2).getValues().find(r=>r[0]===data.id_vehiculo);
-      sh.appendRow([data.id,data.id_vehiculo,vr?vr[1]:'',data.fecha?new Date(data.fecha):new Date(),
+      sh.appendRow([data.id,data.id_vehiculo,vr?vr[1]:'',_parseLocalDate(data.fecha),
         data.categoria||'',data.descripcion||'',data.proveedor||'',
         Number(data.importe_ars)||0,Number(data.importe_usd)||0,data.factura||'']);
     } else {
       const ids=sh.getRange(2,1,sh.getLastRow()-1,1).getValues().flat();
       const ri=ids.indexOf(data.id);if(ri===-1)return{ok:false};
-      sh.getRange(ri+2,4).setValue(data.fecha?new Date(data.fecha):new Date());
+      sh.getRange(ri+2,4).setValue(_parseLocalDate(data.fecha));
       [[5,data.categoria],[6,data.descripcion],[7,data.proveedor],
        [8,Number(data.importe_ars)||0],[9,Number(data.importe_usd)||0],[10,data.factura||'']]
       .forEach(([c,v])=>sh.getRange(ri+2,c).setValue(v));
@@ -309,7 +325,7 @@ function _saveCajaRaw(data) {
   let saldoAnt = cSh.getLastRow()>1?Number(cSh.getRange(cSh.getLastRow(),9).getValue())||0:0;
   const debe=Number(data.debe)||0,haber=Number(data.haber)||0;
   const saldo=saldoAnt+debe-haber;
-  cSh.appendRow([idC,data.fecha?new Date(data.fecha):new Date(),data.detalle||'',
+  cSh.appendRow([idC,_parseLocalDate(data.fecha),data.detalle||'',
     data.observacion||'',data.concepto||'',data.entidad||'AGA',debe,haber,saldo,
     data.medio_pago||'',data.referencia||'',_subCajaDe(data)]);
   return {idCaja:idC,saldo};
@@ -317,18 +333,70 @@ function _saveCajaRaw(data) {
 
 function saveMovimientoCajaCompleto(data) {
   try {
-    const idCaja = _id('CAJ');
-    const cSh = SS.getSheetByName('CAJA');
-    let saldoAnt = cSh.getLastRow()>1?Number(cSh.getRange(cSh.getLastRow(),9).getValue())||0:0;
-    const debe=Number(data.debe)||0,haber=Number(data.haber)||0;
-    const saldo=saldoAnt+debe-haber;
+    let idCaja, saldo;
+    const isMix = data.payment_sources?.mix?.length > 0;
 
-    cSh.appendRow([idCaja,data.fecha?new Date(data.fecha):new Date(),data.detalle||'',
-      data.observacion||'',data.concepto||'',data.entidad||'AGA',debe,haber,saldo,
-      data.medio_pago||'',data.referencia||'',_subCajaDe(data)]);
+    if(isMix) {
+      const mix = data.payment_sources.mix;
+      let firstId = null;
+      const cSh = SS.getSheetByName('CAJA');
+      // Detectar si es ingreso (venta) por flag o por debe > haber
+      const esIngreso = data.es_ingreso === true || (Number(data.debe)||0) > (Number(data.haber)||0);
+
+      mix.forEach(comp => {
+        let compAmt = 0, compTipo = '';
+        if(comp.medio==='ARS')      { compAmt=comp.ars||0; compTipo=data.tipo||''; }
+        else if(comp.medio==='USD') { compAmt=comp.ars||Math.round((comp.usd||0)*(comp.tc||0)); compTipo=esIngreso?'reg_usd_ing':'reg_usd_eg'; }
+        else if(comp.medio==='CHQ') {
+          compAmt=esIngreso?(comp.ars||0):((comp.cheques||[]).reduce((s,c)=>s+(c.importe||0),0));
+          compTipo=esIngreso?'cobro_cheque':'pago_cheque';
+        }
+        if(!compAmt) return;
+
+        const r=_saveCajaRaw({...data, tipo:compTipo,
+          debe: esIngreso ? compAmt : 0,
+          haber: esIngreso ? 0 : compAmt,
+          detalle:(data.detalle||'')+(mix.length>1?` [${comp.medio}]`:'')});
+        if(!firstId) firstId=r.idCaja;
+
+        if(comp.medio==='USD'&&comp.usd&&comp.tc){
+          const tipoD=esIngreso?'reg_usd_ing':'reg_usd_eg';
+          _dolarInterno({tipo:tipoD,monto_usd:comp.usd,tc:comp.tc,monto_ars:compAmt,
+            fecha:data.fecha,observacion:data.detalle,entidad:data.entidad||'AGA'},r.idCaja);
+        }
+
+        if(comp.medio==='CHQ'){
+          if(esIngreso&&comp.cheque_data){
+            // Ingreso: cheque nuevo recibido del comprador
+            _chequeInterno({tipo:'cobro_cheque',
+              numero:comp.cheque_data.numero||'',banco:comp.cheque_data.banco||'',
+              librador:comp.cheque_data.librador||data.comprador||'',
+              importe:compAmt,fecha_vto:comp.cheque_data.vto||'',
+              fecha:data.fecha,entidad:data.entidad||'AGA',observacion:data.detalle},r.idCaja);
+          } else if(!esIngreso&&comp.cheques){
+            comp.cheques.forEach(ch=>updateEstadoCheque(ch.id,'Entregado',data.fecha));
+          }
+        }
+      });
+
+      idCaja=firstId;
+      saldo=cSh.getLastRow()>1?Number(cSh.getRange(cSh.getLastRow(),9).getValue())||0:0;
+
+    } else {
+      // Pago simple: una sola entrada CAJA (comportamiento original)
+      const cSh = SS.getSheetByName('CAJA');
+      idCaja = _id('CAJ');
+      let saldoAnt = cSh.getLastRow()>1?Number(cSh.getRange(cSh.getLastRow(),9).getValue())||0:0;
+      const debe=Number(data.debe)||0,haber=Number(data.haber)||0;
+      saldo=saldoAnt+debe-haber;
+      cSh.appendRow([idCaja,_parseLocalDate(data.fecha),data.detalle||'',
+        data.observacion||'',data.concepto||'',data.entidad||'AGA',debe,haber,saldo,
+        data.medio_pago||'',data.referencia||'',_subCajaDe(data)]);
+    }
 
     let extra={saldo};
 
+    // Registros secundarios por concepto (usan el primer idCaja como referencia)
     switch(data.tipo) {
       case 'venta_auto':   extra={...extra,..._vtaInterna(data,idCaja)}; break;
       case 'gasto_auto':   extra.idSub=_gastoVehInterno(data,idCaja); break;
@@ -341,30 +409,33 @@ function saveMovimientoCajaCompleto(data) {
       case 'reg_usd_eg':   extra.idSub=_dolarInterno(data,idCaja); break;
     }
 
-    // Parte en USD en cualquier movimiento
-    if (data.usd_monto && data.usd_tc && !['venta_usd','compra_usd','reg_usd_ing','reg_usd_eg'].includes(data.tipo)) {
-      const tipoD = data.debe>0 ? 'Ingreso' : 'Egreso';
-      _dolarInterno({tipo:tipoD==='Ingreso'?'reg_usd_ing':'reg_usd_eg',
+    // Parte en USD (pago simple, no mixto)
+    if(!isMix && data.usd_monto && data.usd_tc && !['venta_usd','compra_usd','reg_usd_ing','reg_usd_eg'].includes(data.tipo)) {
+      _dolarInterno({tipo:data.debe>0?'reg_usd_ing':'reg_usd_eg',
         monto_usd:data.usd_monto,tc:data.usd_tc,
         monto_ars:Math.round(Number(data.usd_monto)*Number(data.usd_tc)),
         contraparte:data.comprador||data.proveedor||'',
-        fecha:data.fecha,observacion:'Parte en USD — '+data.detalle},idCaja);
+        fecha:data.fecha,observacion:'Parte en USD — '+data.detalle,entidad:data.entidad||'AGA'},idCaja);
     }
 
-    // Origen del pago: cheques y/o USD como fuente
-    if (data.payment_sources) {
-      const ps = data.payment_sources;
-      // Si pagó con USD como fuente
-      if (ps.usd && ps.usd.monto_usd && ps.usd.tc) {
-        _dolarInterno({tipo:'reg_usd_eg',monto_usd:ps.usd.monto_usd,tc:ps.usd.tc,
+    // payment_sources método único (USD o CHQ)
+    if(!isMix && data.payment_sources) {
+      const ps=data.payment_sources;
+      if(ps.usd&&ps.usd.monto_usd&&ps.usd.tc){
+        const esIngreso=data.es_ingreso===true||(Number(data.debe)||0)>(Number(data.haber)||0);
+        _dolarInterno({tipo:esIngreso?'reg_usd_ing':'reg_usd_eg',monto_usd:ps.usd.monto_usd,tc:ps.usd.tc,
           monto_ars:Math.round(ps.usd.monto_usd*ps.usd.tc),
-          fecha:data.fecha,observacion:'Pago en USD — '+data.detalle},idCaja);
+          fecha:data.fecha,observacion:'Cobro en USD — '+data.detalle,entidad:data.entidad||'AGA'},idCaja);
       }
-      // Si usó cheques en cartera
-      if (ps.cheques && ps.cheques.length) {
-        ps.cheques.forEach(ch => {
-          updateEstadoCheque(ch.id, 'Entregado', data.fecha);
-        });
+      if(ps.cheques&&ps.cheques.length)
+        ps.cheques.forEach(ch=>updateEstadoCheque(ch.id,'Entregado',data.fecha));
+      // Cheque nuevo recibido (cobro de ingreso)
+      if(ps.chq_nuevo&&ps.chq_nuevo.importe>0){
+        _chequeInterno({tipo:'cobro_cheque',
+          numero:ps.chq_nuevo.numero||'',banco:ps.chq_nuevo.banco||'',
+          librador:data.comprador||'',importe:ps.chq_nuevo.importe,
+          fecha_vto:ps.chq_nuevo.vto||'',
+          fecha:data.fecha,entidad:data.entidad||'AGA',observacion:data.detalle},idCaja);
       }
     }
 
@@ -404,28 +475,31 @@ function registrarVenta(data) {
 function _vtaInterna(data,idCaja) {
   const vSh=SS.getSheetByName('VEHICULOS');
   const vRows=vSh.getRange(2,1,vSh.getLastRow()-1,16).getValues();
-  const vi=vRows.findIndex(r=>r[0]===data.id_vehiculo);if(vi===-1)return{};
+  const vi=vRows.findIndex(r=>r[0]===data.id_vehiculo);
+  if(vi===-1)return{ok:false,error:'Vehículo no encontrado: '+data.id_vehiculo};
   const vr=vRows[vi];
-  const costo=Number(vr[9])||0,precio=Number(data.debe)||0;
+  const costo=Number(vr[9])||0,precio=Number(data.precio_venta)||Number(data.debe)||0;
   const esConsigna=vr[5]==='Consigna';
-  const ganancia=esConsigna ? Math.round(precio*0.05) : precio-costo;
+  // Consigna: comisión editable (default 5%)
+  const comisionPct=esConsigna?(Number(data.comision_pct)||5):100;
+  const ganancia=esConsigna ? Math.round(precio*comisionPct/100) : precio-costo;
   const desc=`${vr[2]} ${vr[3]} ${vr[4]}`.trim(),idVenta=_id('VTA');
   SS.getSheetByName('VENTAS').appendRow([idVenta,data.id_vehiculo,vr[1],desc,
-    data.fecha?new Date(data.fecha):new Date(),
+    _parseLocalDate(data.fecha),
     data.comprador||'',data.vendedor||'',precio,
     Number(data.efectivo)||0,Number(data.vehiculo_entrega)||0,
     Number(data.financiacion)||0,Number(data.tc_dia)||0,costo,ganancia,data.observacion||'']);
   vSh.getRange(vi+2,7).setValue('Vendido');
   SS.getSheetByName('CAJA').getRange(SS.getSheetByName('CAJA').getLastRow(),11).setValue(`VTA:${idVenta}`);
   if(data.comprador)_upsertPersona(data.comprador,'Comprador');
-  return{idVenta,ganancia,vehiculoStr:desc,esConsigna};
+  return{ok:true,idVenta,ganancia,vehiculoStr:desc,esConsigna,comisionPct};
 }
 function _gastoVehInterno(data,idCaja) {
   const id=_id('GV');
   const vSh=SS.getSheetByName('VEHICULOS');
   const vr=vSh.getRange(2,1,vSh.getLastRow()-1,2).getValues().find(r=>r[0]===data.id_vehiculo);
   SS.getSheetByName('GASTOS_VEHICULOS').appendRow([id,data.id_vehiculo,vr?vr[1]:'',
-    data.fecha?new Date(data.fecha):new Date(),data.categoria||'',
+    _parseLocalDate(data.fecha),data.categoria||'',
     data.descripcion||'',data.proveedor||'',Number(data.haber)||0,0,'']);
   _recalcCosto(data.id_vehiculo);
   SS.getSheetByName('CAJA').getRange(SS.getSheetByName('CAJA').getLastRow(),11).setValue(`GV:${id}`);
@@ -435,7 +509,7 @@ function _gastoAgInterno(data,idCaja) {
   const id=_id('GA');
   const neto=Number(data.neto)||Number(data.haber)||0,iva=Number(data.iva)||0;
   const total=Number(data.total)||neto+iva||Number(data.haber)||0;
-  SS.getSheetByName('GASTOS_AGENCIA').appendRow([id,data.fecha?new Date(data.fecha):new Date(),
+  SS.getSheetByName('GASTOS_AGENCIA').appendRow([id,_parseLocalDate(data.fecha),
     _periodo(data.fecha),data.categoria||'',data.tipo||'Variable',
     data.proveedor||'',data.descripcion||'',neto,iva,total,
     data.canal||1,data.medio_pago||'',idCaja,data.observacion||'']);
@@ -464,7 +538,7 @@ function _dolarInterno(data,idCaja) {
   const monto_usd=Number(data.monto_usd)||0,tc=Number(data.tc)||Number(data.tc_dia)||0;
   const monto_ars=Number(data.monto_ars)||Math.round(monto_usd*tc)||Number(data.debe)||Number(data.haber)||0;
   const entidad=data.entidad||'AGA';
-  SS.getSheetByName('DOLARES').appendRow([id,data.fecha?new Date(data.fecha):new Date(),
+  SS.getSheetByName('DOLARES').appendRow([id,_parseLocalDate(data.fecha),
     tipo,monto_usd,tc,monto_ars,data.contraparte||'',idCaja,data.observacion||'',entidad]);
   if(idCaja) SS.getSheetByName('CAJA').getRange(SS.getSheetByName('CAJA').getLastRow(),11).setValue(`USD:${id}`);
   return id;
@@ -659,20 +733,77 @@ function getSaldosSubCaja(entidad) {
 }
 
 
+function getMovimientoDetalle(idCaja) {
+  try {
+    const cSh=SS.getSheetByName('CAJA');if(!cSh||cSh.getLastRow()<2)return{ok:false};
+    const cols=Math.min(cSh.getLastColumn(),12);
+    const rows=cSh.getRange(2,1,cSh.getLastRow()-1,cols).getValues();
+    // Buscar entrada principal Y entradas del mismo concepto (para pagos mixtos)
+    const main=rows.find(r=>r[0]===idCaja);
+    if(!main)return{ok:false,error:'No encontrado'};
+    const entry={id:main[0],fecha:main[1]?_fmt(main[1],'dd/MM/yyyy HH:mm'):'',
+      detalle:main[2],observacion:main[3],concepto:main[4],entidad:main[5],
+      debe:Number(main[6])||0,haber:Number(main[7])||0,saldo:Number(main[8])||0,
+      medio_pago:main[9],referencia:main[10]||'',sub_caja:main[11]||'ARS'};
+    // Buscar registros relacionados (misma referencia o mismo detalle base)
+    const ref=main[10]||'';
+    let linked=null;
+    if(ref){
+      const parts=ref.split(':');const tipo=parts[0],id2=parts.slice(1).join(':');
+      if(tipo==='VTA'&&id2){
+        const vtSh=SS.getSheetByName('VENTAS');
+        if(vtSh){const vr=vtSh.getRange(2,1,vtSh.getLastRow()-1,15).getValues().find(r=>r[0]===id2);
+        if(vr)linked={tipo:'Venta',datos:{vehiculo:vr[3],comprador:vr[5],precio:Number(vr[7]),ganancia:Number(vr[13]),costo:Number(vr[12]),vendedor:vr[6]}};}
+      }
+      if(tipo==='GA'&&id2){
+        const gaSh=SS.getSheetByName('GASTOS_AGENCIA');
+        if(gaSh){const gr=gaSh.getRange(2,1,gaSh.getLastRow()-1,14).getValues().find(r=>r[0]===id2);
+        if(gr)linked={tipo:'Gasto Agencia',datos:{categoria:gr[3],proveedor:gr[5],descripcion:gr[6],neto:Number(gr[7]),iva:Number(gr[8]),total:Number(gr[9])}};}
+      }
+      if(tipo==='GV'&&id2){
+        const gvSh=SS.getSheetByName('GASTOS_VEHICULOS');
+        if(gvSh){const gv=gvSh.getRange(2,1,gvSh.getLastRow()-1,10).getValues().find(r=>r[0]===id2);
+        if(gv)linked={tipo:'Gasto Vehículo',datos:{vehiculo:gv[2],categoria:gv[4],descripcion:gv[5],proveedor:gv[6],importe:Number(gv[7])}};}
+      }
+      if(tipo==='CHQ'&&id2){
+        const chSh=SS.getSheetByName('CHEQUES');
+        if(chSh){const ch=chSh.getRange(2,1,chSh.getLastRow()-1,12).getValues().find(r=>r[0]===id2);
+        if(ch)linked={tipo:'Cheque',datos:{numero:ch[1],banco:ch[3],librador:ch[4],importe:Number(ch[6]),fecha_vto:ch[7]?_fmt(ch[7],'dd/MM/yyyy'):'',estado:ch[9]}};}
+      }
+      if(tipo==='USD'&&id2){
+        const dSh=SS.getSheetByName('DOLARES');
+        if(dSh){const dr=dSh.getRange(2,1,dSh.getLastRow()-1,9).getValues().find(r=>r[0]===id2);
+        if(dr)linked={tipo:'USD',datos:{tipo_mov:dr[2],monto_usd:Number(dr[3]),tc:Number(dr[4]),monto_ars:Number(dr[5]),contraparte:dr[6]}};}
+      }
+      if(tipo==='VEH'&&id2){
+        const vhSh=SS.getSheetByName('VEHICULOS');
+        if(vhSh){const vh=vhSh.getRange(2,1,vhSh.getLastRow()-1,11).getValues().find(r=>r[0]===id2);
+        if(vh)linked={tipo:'Vehículo',datos:{dominio:vh[1],marca:vh[2],modelo:vh[3],anio:vh[4],tipo:vh[5],estado:vh[6],precio:Number(vh[7])}};}
+      }
+    }
+    return{ok:true,entry,linked};
+  }catch(e){return{ok:false,error:e.message};}
+}
+
+
 function getDolares(mes,anio,entidad) {
   try {
-    const sh=SS.getSheetByName('DOLARES');if(!sh||sh.getLastRow()<2)return[];
+    const sh=SS.getSheetByName('DOLARES');
+    if(!sh||sh.getLastRow()<2) return [];
     const ent=entidad||'AGA';
-    const ncols=Math.min(sh.getLastColumn(),10);
-    let rows=sh.getRange(2,1,sh.getLastRow()-1,ncols).getValues().filter(r=>r[0]);
-    // col 10 = índice 9 = ENTIDAD (default 'AGA' para filas anteriores)
+    const lc=sh.getLastColumn();
+    let rows=sh.getRange(2,1,sh.getLastRow()-1,lc).getValues().filter(r=>r[0]);
     rows=rows.filter(r=>(r[9]||'AGA')===ent);
-    if(mes&&anio)rows=rows.filter(r=>{const f=new Date(r[1]);return f.getMonth()===parseInt(mes)-1&&f.getFullYear()===parseInt(anio);});
-    return rows.map(r=>({id:r[0],fecha:r[1]?_fmt(r[1],'dd/MM/yyyy'):'',tipo:r[2],
+    if(mes&&anio){
+      const m=parseInt(mes)-1,y=parseInt(anio);
+      rows=rows.filter(r=>{if(!r[1])return false;const f=new Date(r[1]);return f.getMonth()===m&&f.getFullYear()===y;});
+    }
+    // Ordenar ANTES del map mientras r[1] es Date object (evita new Date('dd/MM/yyyy') inválido)
+    rows.sort((a,b)=>{const ta=a[1]?new Date(a[1]).getTime():0,tb=b[1]?new Date(b[1]).getTime():0;return tb-ta;});
+    return rows.map(r=>({id:r[0],fecha:r[1]?_fmt(r[1],'dd/MM/yyyy'):'',tipo:r[2]||'',
       monto_usd:Number(r[3])||0,tc:Number(r[4])||0,monto_ars:Number(r[5])||0,
-      contraparte:r[6],id_caja_ref:r[7],observaciones:r[8],entidad:r[9]||'AGA'}))
-      .sort((a,b)=>new Date(b.fecha)-new Date(a.fecha));
-  }catch(e){return[];}
+      contraparte:r[6]||'',id_caja_ref:r[7]||'',observaciones:r[8]||'',entidad:r[9]||'AGA'}));
+  }catch(e){Logger.log('getDolares error: '+e.toString());return[];}
 }
 
 // ── Ventas ─────────────────────────────────────────────────────
@@ -856,6 +987,14 @@ function saveConfigUI(prefs) {
 function _id(p){return`${p}-${Date.now()}-${Math.floor(Math.random()*999)}`;}
 function _fmt(d,fmt){try{return d?Utilities.formatDate(new Date(d),'America/Argentina/Buenos_Aires',fmt):''}catch(e){return'';}}
 function _periodo(f){const d=f?new Date(f):new Date();return Utilities.formatDate(d,'America/Argentina/Buenos_Aires','MM/yyyy');}
+// Parsea 'YYYY-MM-DD' al mediodía local para evitar desfase de zona horaria UTC-3
+function _parseLocalDate(v){
+  if(!v)return new Date();
+  if(v instanceof Date)return v;
+  const p=String(v).split('-');
+  if(p.length>=3)return new Date(parseInt(p[0]),parseInt(p[1])-1,parseInt(p[2]),12,0,0);
+  return new Date(v);
+}
 
 // ── Setup ─────────────────────────────────────────────────────
 function setupSheets() {
