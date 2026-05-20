@@ -41,9 +41,8 @@
 <section id="page-dashboard" class="page active">
   <div class="page-header">
     <div><h1 id="dash-mes">Dashboard</h1><p class="sub">Resumen operativo</p></div>
-    <button class="btn-primary" onclick="navigate('caja');setTimeout(()=>abrirWizard(),100)">
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-      Nuevo movimiento
+    <button class="btn-secondary" onclick="navigate('caja')" style="font-size:12px">
+      Ir a Caja →
     </button>
   </div>
   <div class="kpi-grid" id="kpi-grid">
@@ -57,12 +56,6 @@
 <section id="page-inventario" class="page">
   <div class="page-header">
     <div><h1>Inventario</h1><p class="sub" id="inv-sub">Vehículos activos</p></div>
-    <? if(userInfo.role==='admin'){ ?>
-    <button class="btn-primary" onclick="navigate('caja');setTimeout(()=>abrirWizard('egreso','compra_auto'),150)">
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-      Registrar auto
-    </button>
-    <? } ?>
   </div>
   <div class="filter-tabs">
     <button class="ftab active" onclick="filtrarInv(this,'activos')">Activos</button>
@@ -77,7 +70,14 @@
   </div>
   <div class="table-wrap">
     <table class="data-table">
-      <thead><tr><th>Dominio</th><th>Vehículo</th><th>Tipo</th><th>Estado</th><th class="num">Costo</th><th class="num">Días</th><th></th></tr></thead>
+      <thead><tr>
+        <th data-col="0" onclick="sortTable('inv-tbody',0)" class="th-sort">Dominio</th>
+        <th data-col="1" onclick="sortTable('inv-tbody',1)" class="th-sort">Vehículo</th>
+        <th data-col="2" onclick="sortTable('inv-tbody',2)" class="th-sort">Tipo</th>
+        <th data-col="3" onclick="sortTable('inv-tbody',3)" class="th-sort">Estado</th>
+        <th class="num" data-col="4" onclick="sortTable('inv-tbody',4)" class="th-sort">Costo</th>
+        <th class="num" data-col="5" onclick="sortTable('inv-tbody',5)" class="th-sort">Días</th>
+        <th></th></tr></thead>
       <tbody id="inv-tbody"><tr><td colspan="7" class="empty-row">Cargando...</td></tr></tbody>
     </table>
   </div>
@@ -122,9 +122,15 @@
   <!-- General -->
   <div id="itab-general" class="itab-content active">
     <div class="table-wrap"><table class="data-table">
-      <thead><tr><th>Fecha</th><th>Detalle</th><th>Concepto</th><th>Caja</th>
-        <th class="num income-col">Ingreso</th><th class="num expense-col">Egreso</th>
-        <th class="num">Saldo</th><th></th></tr></thead>
+      <thead><tr>
+        <th data-col="0" onclick="sortTable('caja-tbody-general',0)" class="th-sort">Fecha</th>
+        <th data-col="1" onclick="sortTable('caja-tbody-general',1)" class="th-sort">Detalle</th>
+        <th data-col="2" onclick="sortTable('caja-tbody-general',2)" class="th-sort">Concepto</th>
+        <th data-col="3" onclick="sortTable('caja-tbody-general',3)" class="th-sort">Caja</th>
+        <th class="num income-col" data-col="4" onclick="sortTable('caja-tbody-general',4)" class="th-sort">Ingreso</th>
+        <th class="num expense-col" data-col="5" onclick="sortTable('caja-tbody-general',5)" class="th-sort">Egreso</th>
+        <th class="num" data-col="6" onclick="sortTable('caja-tbody-general',6)" class="th-sort">Saldo</th>
+        <th></th></tr></thead>
       <tbody id="caja-tbody-general"><tr><td colspan="8" class="empty-row">Cargando...</td></tr></tbody>
     </table></div>
   </div>
@@ -140,8 +146,14 @@
   <!-- Dólares -->
   <div id="itab-dolares" class="itab-content">
     <div class="table-wrap"><table class="data-table">
-      <thead><tr><th>Fecha</th><th>Tipo</th><th class="num">USD</th><th class="num">TC</th>
-        <th class="num">ARS equiv.</th><th>Contraparte</th><th></th></tr></thead>
+      <thead><tr>
+        <th data-col="0" onclick="sortTable('dolares-tbody',0)" class="th-sort">Fecha</th>
+        <th data-col="1" onclick="sortTable('dolares-tbody',1)" class="th-sort">Tipo</th>
+        <th class="num" data-col="2" onclick="sortTable('dolares-tbody',2)" class="th-sort">USD</th>
+        <th class="num" data-col="3" onclick="sortTable('dolares-tbody',3)" class="th-sort">TC</th>
+        <th class="num" data-col="4" onclick="sortTable('dolares-tbody',4)" class="th-sort">ARS equiv.</th>
+        <th data-col="5" onclick="sortTable('dolares-tbody',5)" class="th-sort">Contraparte</th>
+        <th></th></tr></thead>
       <tbody id="dolares-tbody"><tr><td colspan="7" class="empty-row">Cargando...</td></tr></tbody>
     </table></div>
   </div>
@@ -154,16 +166,32 @@
       <button class="ftab" onclick="filtrarCheques(this,'propios')">Propios</button>
     </div>
     <div class="table-wrap"><table class="data-table">
-      <thead><tr><th>Número</th><th>Tipo</th><th>Banco</th><th>Librador</th>
-        <th class="num">Importe</th><th>Vencimiento</th><th>Cobrado</th><th>Estado</th><th></th></tr></thead>
+      <thead><tr>
+        <th data-col="0" onclick="sortTable('cheques-tbody',0)" class="th-sort">Número</th>
+        <th data-col="1" onclick="sortTable('cheques-tbody',1)" class="th-sort">Tipo</th>
+        <th data-col="2" onclick="sortTable('cheques-tbody',2)" class="th-sort">Banco</th>
+        <th data-col="3" onclick="sortTable('cheques-tbody',3)" class="th-sort">Librador</th>
+        <th class="num" data-col="4" onclick="sortTable('cheques-tbody',4)" class="th-sort">Importe</th>
+        <th data-col="5" onclick="sortTable('cheques-tbody',5)" class="th-sort">Vencimiento</th>
+        <th data-col="6" onclick="sortTable('cheques-tbody',6)" class="th-sort">Cobrado</th>
+        <th data-col="7" onclick="sortTable('cheques-tbody',7)" class="th-sort">Estado</th>
+        <th></th></tr></thead>
       <tbody id="cheques-tbody"><tr><td colspan="9" class="empty-row">Cargando...</td></tr></tbody>
     </table></div>
   </div>
   <!-- Gastos -->
   <div id="itab-gastos" class="itab-content">
     <div class="table-wrap"><table class="data-table">
-      <thead><tr><th>Fecha</th><th>Categoría</th><th>Proveedor</th><th>Descripción</th>
-        <th>Tipo</th><th class="num">Neto</th><th class="num">IVA</th><th class="num">Total</th><th></th></tr></thead>
+      <thead><tr>
+        <th data-col="0" onclick="sortTable('gastos-tbody',0)" class="th-sort">Fecha</th>
+        <th data-col="1" onclick="sortTable('gastos-tbody',1)" class="th-sort">Categoría</th>
+        <th data-col="2" onclick="sortTable('gastos-tbody',2)" class="th-sort">Proveedor</th>
+        <th data-col="3" onclick="sortTable('gastos-tbody',3)" class="th-sort">Descripción</th>
+        <th data-col="4" onclick="sortTable('gastos-tbody',4)" class="th-sort">Tipo</th>
+        <th class="num" data-col="5" onclick="sortTable('gastos-tbody',5)" class="th-sort">Neto</th>
+        <th class="num" data-col="6" onclick="sortTable('gastos-tbody',6)" class="th-sort">IVA</th>
+        <th class="num" data-col="7" onclick="sortTable('gastos-tbody',7)" class="th-sort">Total</th>
+        <th></th></tr></thead>
       <tbody id="gastos-tbody"><tr><td colspan="9" class="empty-row">Cargando...</td></tr></tbody>
     </table></div>
   </div>
