@@ -345,6 +345,13 @@ textarea.field{resize:vertical;min-height:60px;}
 .etog:not(:last-child){border-right:1.5px solid var(--bord);}
 
 /* ═══ Payment sources ══════════════════════════ */
+/* ═══ Entity toggle in wizard ═══════════════ */
+.entidad-toggle-wrap{display:flex;gap:4px;margin-top:4px;}
+.entidad-btn{flex:1;padding:7px 12px;border-radius:var(--rs);border:1.5px solid var(--bord);background:transparent;font-size:13px;font-weight:500;cursor:pointer;color:var(--t2);transition:all .15s;}
+.entidad-btn:hover{border-color:var(--acc);color:var(--acc);}
+.entidad-btn.active{background:var(--acc);border-color:var(--acc);color:#fff;font-weight:700;}
+.entidad-btn.active[id="entbtn-Martin"]{background:#059669;border-color:#059669;}
+
 /* ═══ Field error state ═════════════════════ */
 .field-error{border-color:var(--err)!important;box-shadow:0 0 0 2px rgba(239,68,68,.15)!important;background:#fff5f5!important;}
 
