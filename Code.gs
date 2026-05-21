@@ -160,10 +160,11 @@ function getVehiculosDisponibles() {
 function getTodosVehiculos() {
   try {
     const sh = SS.getSheetByName('VEHICULOS'); if(!sh||sh.getLastRow()<2) return [];
-    return sh.getRange(2,1,sh.getLastRow()-1,12).getValues()
+    return sh.getRange(2,1,sh.getLastRow()-1,11).getValues()
       .filter(r=>r[0]&&r[6]!=='Eliminado'&&r[6]!=='Vendido')
-      .map(r=>({id:r[0],dominio:r[1],marca:r[2],modelo:r[3],anio:r[4],tipo:r[5],costo_total:Number(r[9])||0,
-        ex_dueno_nombre:r[11]||'',
+      .map(r=>({id:r[0],dominio:r[1],marca:r[2],modelo:r[3],anio:r[4],tipo:r[5],
+        precio_toma:Number(r[7])||0,precio_tabla:Number(r[8])||0,
+        costo_total:Number(r[9])||0,markup_consigna:Number(r[10])||0,
         label:`${r[1]} — ${r[2]} ${r[3]} ${r[4]}`}));
   } catch(e){ return []; }
 }
@@ -173,7 +174,9 @@ function getVehiculosMartin() {
     const sh = SS.getSheetByName('VEHICULOS'); if(!sh||sh.getLastRow()<2) return [];
     return sh.getRange(2,1,sh.getLastRow()-1,12).getValues()
       .filter(r=>r[0]&&r[6]!=='Eliminado'&&r[6]!=='Vendido'&&String(r[11]||'').toLowerCase().includes('martin'))
-      .map(r=>({id:r[0],dominio:r[1],marca:r[2],modelo:r[3],anio:r[4],tipo:r[5],costo_total:Number(r[9])||0,
+      .map(r=>({id:r[0],dominio:r[1],marca:r[2],modelo:r[3],anio:r[4],tipo:r[5],
+        precio_toma:Number(r[7])||0,precio_tabla:Number(r[8])||0,
+        costo_total:Number(r[9])||0,markup_consigna:Number(r[10])||0,
         ex_dueno_nombre:r[11]||'',
         label:`${r[1]} — ${r[2]} ${r[3]} ${r[4]}`}));
   } catch(e){ return []; }
@@ -550,18 +553,41 @@ function getMovimientosCaja(mes,anio,subCaja,entidad) {
     const sh=SS.getSheetByName('CAJA');if(!sh||sh.getLastRow()<2)return{ok:true,movimientos:[],saldo:0};
     const cols=Math.min(sh.getLastColumn(),12);
     const rows=sh.getRange(2,1,sh.getLastRow()-1,cols).getValues().filter(r=>r[0]);
-    let filtrados=rows;
     const ent=entidad||'AGA';
-    filtrados=filtrados.filter(r=>r[5]===ent||(!r[5]&&ent==='AGA'));
-    if(mes&&anio)filtrados=filtrados.filter(r=>{const f=new Date(r[1]);return f.getMonth()===parseInt(mes)-1&&f.getFullYear()===parseInt(anio);});
-    if(subCaja&&subCaja!=='general')filtrados=filtrados.filter(r=>(r[11]||'ARS')===subCaja);
-    const movimientos=filtrados.map(r=>({id:r[0],fecha:r[1]?_fmt(r[1],'dd/MM/yyyy'):'',detalle:r[2],
-      observacion:r[3],concepto:r[4],entidad:r[5],debe:Number(r[6])||0,haber:Number(r[7])||0,
-      saldo:Number(r[8])||0,medio_pago:r[9],referencia:r[10]||'',sub_caja:r[11]||'ARS'}));
-    // Saldo = running total for this entity
-    let saldoEnt=0;
-    rows.filter(r=>r[5]===ent||(!r[5]&&ent==='AGA')).forEach(r=>{saldoEnt+=(Number(r[6])||0)-(Number(r[7])||0);});
-    return{ok:true,movimientos,saldo:saldoEnt};
+
+    // Paso 1: filtrar por entidad
+    let filtrados=rows.filter(r=>r[5]===ent||(!r[5]&&ent==='AGA'));
+
+    // Paso 2: filtrar por mes si aplica
+    if(mes&&anio){
+      const m=parseInt(mes)-1,y=parseInt(anio);
+      filtrados=filtrados.filter(r=>{
+        if(!r[1])return false;
+        const f=new Date(r[1]);return f.getMonth()===m&&f.getFullYear()===y;
+      });
+    }
+
+    // Paso 3: filtrar por sub-caja si aplica
+    if(subCaja&&subCaja!=='general')
+      filtrados=filtrados.filter(r=>(r[11]||'ARS')===subCaja);
+
+    // Paso 4: ordenar por fecha ascendente y recalcular saldo desde cero (sin mezcla de entidades)
+    filtrados.sort((a,b)=>new Date(a[1])-new Date(b[1]));
+    let runSaldo=0;
+    const movimientos=filtrados.map(r=>{
+      const debe=Number(r[6])||0,haber=Number(r[7])||0;
+      runSaldo+=debe-haber;
+      return {id:r[0],fecha:r[1]?_fmt(r[1],'dd/MM/yyyy'):'',detalle:r[2],
+        observacion:r[3],concepto:r[4],entidad:r[5]||'AGA',
+        debe,haber,saldo:runSaldo, // saldo recalculado solo con movimientos de esta entidad/filtro
+        medio_pago:r[9],referencia:r[10]||'',sub_caja:r[11]||'ARS'};
+    });
+
+    // Saldo total de la entidad (sin filtro de mes/subcaja) para el encabezado
+    let saldoTotal=0;
+    rows.filter(r=>r[5]===ent||(!r[5]&&ent==='AGA')).forEach(r=>{saldoTotal+=(Number(r[6])||0)-(Number(r[7])||0);});
+
+    return{ok:true,movimientos,saldo:saldoTotal};
   }catch(e){return{ok:false,error:e.message};}
 }
 function deleteMovimientoCaja(id) {
