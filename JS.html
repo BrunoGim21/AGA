@@ -866,8 +866,18 @@ function wzRenderForm(){
     <span class="wizard-tipo-badge ${WZ.tipo==='ingreso'?'ing':'eg'}">${WZ.tipo==='ingreso'?'↑ INGRESO':'↓ EGRESO'}</span>
     <span class="wizard-concepto">${icon} ${label}</span>
   </div>
-  <div class="form-row"><div class="form-group"><label class="lbl">Fecha *</label><input class="field" type="date" id="wf-fecha" value="${hoy}"></div>
-  <div class="form-group"><label class="lbl">Entidad</label><select class="field" id="wf-entidad" onchange="wzEntidadChanged()"><option value="AGA" ${(ENTIDAD_ACTUAL||'AGA')==='AGA'?'selected':''}>AGA</option><option value="Martin" ${ENTIDAD_ACTUAL==='Martin'?'selected':''}>Martín</option><option value="AGM">AGM</option></select></div></div>`;
+  <div class="form-row" style="align-items:flex-end">
+    <div class="form-group" style="flex:1"><label class="lbl">Fecha *</label>
+      <input class="field" type="date" id="wf-fecha" value="${hoy}"></div>
+    <div class="form-group">
+      <label class="lbl">Guardar en</label>
+      <div class="entidad-toggle-wrap">
+        <button type="button" class="entidad-btn active" id="entbtn-AGA" onclick="wzSetEntidad('AGA')">🏢 AGA</button>
+        <button type="button" class="entidad-btn" id="entbtn-Martin" onclick="wzSetEntidad('Martin')">👤 Martín</button>
+      </div>
+      <input type="hidden" id="wf-entidad" value="AGA">
+    </div>
+  </div>`;
 
   // Specific fields per concept
   if(WZ.concepto==='venta_auto'){
@@ -887,7 +897,7 @@ function wzRenderForm(){
     <div class="form-section-title" style="margin-top:12px">💰 Precio de venta</div>
     <div class="form-row">
       <div class="form-group"><label class="lbl">Precio final *</label>
-        <input class="field money" id="wf-precio" oninput="wzCalcGanancia()">
+        <input class="field money" id="wf-precio" oninput="wzCalcGanancia();payAutoFillFromImporte()">
         <div id="wf-precio-hint" class="field-hint"></div>
       </div>
       <div class="form-group"><label class="lbl">TC del día (blue)</label>
@@ -927,26 +937,7 @@ function wzRenderForm(){
       </div>
     </div>
 
-    <div id="venta-pay-section"></div>
-
-    <!-- Parte de pago con auto (separado del método de pago) -->
-    <div style="margin-top:8px;padding:10px 0;border-top:1px solid var(--bord)">
-      <label onclick="wzToggleVehPago(this)" style="cursor:pointer;display:flex;align-items:center;gap:8px">
-        <input type="checkbox" id="wf-veh-toggle">
-        <span style="font-size:13px;font-weight:500">🚗 Entregan auto como parte de pago</span>
-      </label>
-      <div id="wf-veh-pago-fields" style="display:none;margin-top:8px">
-        <div class="form-row">
-          <div class="form-group"><label class="lbl">Auto entregado</label>
-            <select class="field" id="wf-auto-parte" onchange="wzSetVehParteCosto()"><option value="">Cargando...</option></select>
-          </div>
-          <div class="form-group"><label class="lbl">Valor acordado</label>
-            <input class="field money" id="wf-veh" oninput="wzCalcDif()">
-            <div id="wf-veh-costo-hint" class="field-hint"></div>
-          </div>
-        </div>
-      </div>
-    </div>`;
+    <div id="venta-pay-section"></div>`;
   } // cierra if(venta_auto)
   else if(WZ.concepto==='gasto_auto'){
     formHtml+=`
@@ -1221,6 +1212,7 @@ function wzRenderForm(){
           <option value="ARS">💵 Efectivo / Pesos ARS</option>
           <option value="USD">💰 Dólares</option>
           <option value="CHQ">📋 Cheque (recibido del comprador)</option>
+          <option value="AUTO">🚗 Entrega de auto (parte de pago)</option>
           <option value="MIX">🔀 Mixto (varios métodos)</option>
         </select>
       </div>
@@ -1249,6 +1241,23 @@ function wzRenderForm(){
           <div class="form-group"><label class="lbl">Importe *</label><input class="field money" id="ps-chq-importe" oninput="calcPayTotal()"></div>
         </div>
       </div>
+      <!-- Auto como parte de pago -->
+      <div class="pay-source-block" id="pbs-auto" style="display:none">
+        <div class="pay-source-header"><span>🚗 <strong>Auto entregado como parte de pago</strong></span></div>
+        <div class="form-group">
+          <label class="lbl">Auto entregado</label>
+          <div style="display:flex;gap:6px">
+            <select class="field" id="ps-auto-sel" onchange="psAutoSelChanged()" style="flex:1">
+              <option value="">Cargando autos disponibles...</option>
+            </select>
+            <button type="button" class="btn-secondary" onclick="abrirRegistroAutoEntrega()" title="Registrar auto nuevo" style="flex:0 0 auto;padding:0 12px;font-size:18px">+</button>
+          </div>
+        </div>
+        <div class="form-group"><label class="lbl">Valor acordado *</label>
+          <input class="field money" id="ps-auto-val" placeholder="$ 0" oninput="calcPayTotal()">
+          <div id="ps-auto-costo-hint" class="field-hint"></div>
+        </div>
+      </div>
       <div class="pay-source-block" id="pbs-mix" style="display:none">
         <div id="mix-rows-container"></div>
         <button class="btn-secondary" id="mix-add-btn" onclick="mixAddRow()" style="width:100%;margin-top:8px;font-size:12px;justify-content:center">+ Agregar otro método</button>
@@ -1271,11 +1280,17 @@ function wzRenderForm(){
       }).getTodosVehiculos();
     }).getVehiculosDisponibles();
     payMedioChanged(); // inicializar selector de pago
+    // Cargar autos disponibles para el selector de entrega (pbs-auto)
+    google.script.run.withSuccessHandler(todos=>{
+      const autoSel=document.getElementById('ps-auto-sel');
+      if(!autoSel)return;
+      autoSel.innerHTML='<option value="">— Ninguno (o cargar luego) —</option>'+todos.map(v=>`<option value="${v.id}" data-costo="${v.costo_total}">${v.label}</option>`).join('');
+    }).getTodosVehiculos();
   } // cierra if(venta_auto)
   else if(WZ.concepto==='gasto_auto')
     google.script.run.withSuccessHandler(vs=>{
       const sel=document.getElementById('wf-vehiculo'); if(!sel) return;
-      const entidadActual=document.getElementById('wf-entidad')?.value||ENTIDAD_ACTUAL;
+      const entidadActual=document.getElementById('wf-entidad')?.value||'AGA';
       sel.innerHTML='<option value="">— Seleccioná un auto —</option>'+vs.map(v=>`<option value="${v.id}">${v.label}</option>`).join('');
       if(WZ.preVehiculo) sel.value=WZ.preVehiculo;
     })[(ENTIDAD_ACTUAL==='Martin'||(document.getElementById('wf-entidad')?.value==='Martin'))?'getVehiculosMartin':'getTodosVehiculos']();
@@ -1323,10 +1338,117 @@ function wzToggleVehPago(label){
   wzCalcDif();
 }
 
+// Abre un mini-modal para registrar un auto nuevo como parte de pago en la venta
+let _autoEntregaTarget={type:'single',idx:null};
+let _ventaModalHtml=null; // guarda el HTML del wizard de venta para restaurarlo
+
+function abrirRegistroAutoEntrega(type='single',idx=null){
+  _autoEntregaTarget={type,idx};
+  _ventaModalHtml=document.getElementById('modal-inner').innerHTML; // guardar venta actual
+  const anioActual=new Date().getFullYear();
+  document.getElementById('modal-inner').innerHTML=`
+    <div class="modal-head">
+      <div class="modal-title">🚗 Registrar auto (parte de pago)</div>
+      <button class="btn-close" onclick="restaurarVentaModal()"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>
+    </div>
+    <div class="modal-body">
+      <p class="field-hint" style="margin-bottom:12px">El auto se registrará en el inventario. Una vez guardado, se autoseleccionará en el pago.</p>
+      <div class="form-row">
+        <div class="form-group"><label class="lbl">Dominio *</label><input class="field" id="ae-dominio" placeholder="ABC123" oninput="this.value=this.value.toUpperCase()"></div>
+        <div class="form-group"><label class="lbl">Año *</label><input class="field" type="number" id="ae-anio" value="${anioActual}" min="1950" max="${anioActual+1}"></div>
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label class="lbl">Marca *</label>
+          <select class="field" id="ae-marca"><option value="">Cargando marcas...</option></select>
+        </div>
+        <div class="form-group"><label class="lbl">Modelo *</label><input class="field" id="ae-modelo" placeholder="Corolla, Golf..."></div>
+      </div>
+      <div class="form-row">
+        <div class="form-group"><label class="lbl">Tipo</label>
+          <select class="field" id="ae-tipo"><option value="Usado">Usado</option><option value="OKM">0km</option></select>
+        </div>
+        <div class="form-group"><label class="lbl">Valor acordado (parte de pago) *</label>
+          <input class="field money" id="ae-valor" placeholder="$ 0">
+        </div>
+      </div>
+      <div class="form-group"><label class="lbl">Propietario anterior</label><input class="field" id="ae-dueno" placeholder="Nombre del vendedor"></div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn-secondary" onclick="restaurarVentaModal()">← Volver</button>
+      <button class="btn-ok" id="ae-guardar-btn" onclick="guardarAutoEntrega()">Registrar auto</button>
+    </div>`;
+  // Cargar marcas en el desplegable
+  google.script.run.withSuccessHandler(marcas=>{
+    const sel=document.getElementById('ae-marca');if(!sel)return;
+    sel.innerHTML='<option value="">Seleccioná marca...</option>'+marcas.map(m=>`<option value="${m}">${m}</option>`).join('');
+  }).getMarcas();
+}
+
+// Restaura el modal de venta sin perder nada
+function restaurarVentaModal(){
+  if(_ventaModalHtml){
+    document.getElementById('modal-inner').innerHTML=_ventaModalHtml;
+    _ventaModalHtml=null;
+    toast('Volviste al formulario de venta','info');
+  } else {
+    cerrarModal();
+  }
+}
+
+function guardarAutoEntrega(){
+  const dominio=(document.getElementById('ae-dominio')?.value||'').toUpperCase().trim();
+  if(!dominio)return fieldError('ae-dominio','Ingresá el dominio');
+  const anio=parseInt(document.getElementById('ae-anio')?.value)||0;
+  if(!anio)return fieldError('ae-anio','Ingresá el año');
+  const marca=document.getElementById('ae-marca')?.value||'';
+  if(!marca)return fieldError('ae-marca','Seleccioná la marca');
+  const modelo=document.getElementById('ae-modelo')?.value||'';
+  if(!modelo)return fieldError('ae-modelo','Ingresá el modelo');
+  const valor=moneyVal('ae-valor');
+  if(!valor)return fieldError('ae-valor','Ingresá el valor acordado');
+  const tipo=document.getElementById('ae-tipo')?.value||'Usado';
+  const dueno=document.getElementById('ae-dueno')?.value||'';
+  const btn=document.getElementById('ae-guardar-btn');
+  if(btn){btn.disabled=true;btn.textContent='Registrando...';}
+  google.script.run.withSuccessHandler(r=>{
+    if(!r?.ok){toast(r?.error||'Error al registrar','err');if(btn){btn.disabled=false;btn.textContent='Registrar auto';}return;}
+    // Restaurar el modal de venta
+    if(_ventaModalHtml){
+      document.getElementById('modal-inner').innerHTML=_ventaModalHtml;
+      _ventaModalHtml=null;
+    }
+    toast(`Auto ${dominio} registrado · Seleccionado en el pago`,'ok');
+    // Actualizar los selectores de auto con el nuevo vehículo autoseleccionado
+    const target=_autoEntregaTarget;
+    google.script.run.withSuccessHandler(todos=>{
+      VEH_MAP=VEH_MAP||{};todos.forEach(v=>{VEH_MAP[v.id]=v;});
+      const selIds=target.type==='mix'
+        ?['ps-auto-sel','mix-auto-sel-'+target.idx]
+        :['ps-auto-sel'];
+      selIds.forEach(sid=>{
+        const sel=document.getElementById(sid);if(!sel)return;
+        sel.innerHTML='<option value="">— Seleccioná auto —</option>'+
+          todos.map(v=>`<option value="${v.id}" data-costo="${v.costo_total}"${v.id===r.id?' selected':''}>${v.label}</option>`).join('');
+      });
+      // Setear el valor acordado
+      if(target.type==='mix'&&target.idx!==null){
+        setMoney('mix-auto-val-'+target.idx,valor);
+        calcMixTotal();
+      }else{setMoney('ps-auto-val',valor);calcPayTotal();}
+    }).getTodosVehiculos();
+  }).saveVehiculo({dominio,marca,modelo,anio,tipo,precio_toma:valor,
+    precio_tabla:0,markup_consigna:0,ex_dueno_nombre:dueno,
+    fecha_ingreso:new Date().toISOString().slice(0,10),registrar_caja:false});
+}
+function wzSetEntidad(ent){
+  document.getElementById('wf-entidad').value=ent;
+  document.querySelectorAll('.entidad-btn').forEach(b=>b.classList.toggle('active',b.id==='entbtn-'+ent));
+  wzEntidadChanged();
+}
 // Tipo de auto cambia → actualizar restricciones
 function compraAutoTipoChanged(){
   const tipo=document.getElementById('wf-tipo-veh')?.value;
-  const entidad=document.getElementById('wf-entidad')?.value||ENTIDAD_ACTUAL;
+  const entidad=document.getElementById('wf-entidad')?.value||'AGA';
   // El banner de Martín se muestra si: entidad=Martín O tipo=Consigna y entidad=Martin
   _actualizarBannerMartin(entidad, tipo);
 }
@@ -1337,9 +1459,18 @@ function _actualizarBannerMartin(entidad, tipo){
   if(banner) banner.style.display=(entidad==='Martin'&&tipo==='Consigna')?'':'none';
 }
 
-// Cuando cambia la entidad en el wizard
+// Cuando cambia el auto seleccionado para parte de pago
+function psAutoSelChanged(){
+  const sel=document.getElementById('ps-auto-sel');
+  const hint=document.getElementById('ps-auto-costo-hint');
+  if(!sel||!hint)return;
+  const costo=parseFloat(sel.options[sel.selectedIndex]?.getAttribute('data-costo'))||0;
+  if(costo>0){hint.textContent=`Costo registrado: ${fmtARS(costo)}`;hint.style.color='var(--t2)';}
+  else hint.textContent='';
+  calcPayTotal();
+}
 function wzEntidadChanged(){
-  const entidad=document.getElementById('wf-entidad')?.value||ENTIDAD_ACTUAL;
+  const entidad=document.getElementById('wf-entidad')?.value||'AGA';
   if(WZ.concepto==='compra_auto'){
     const tipoSel=document.getElementById('wf-tipo-veh');
     if(tipoSel&&entidad==='Martin'){
@@ -1378,9 +1509,12 @@ function wzPreloadVehiculo(){
   const veh=VEH_MAP[sel.value]||{};
   sel.dataset.costo=veh.costo_total||0;
 
-  // Gastos = costo_total - precio_toma (la diferencia son los gastos acumulados)
-  const gastos=Math.max(0,(veh.costo_total||0)-(veh.precio_toma||0));
   const esConsigna=veh.tipo==='Consigna';
+  // Para consigna: costo_total = gastos × markup (ej: 40K × 1.30 = 52K)
+  // Para no-consigna: costo_total = precio_toma + gastos
+  const gastos=esConsigna
+    ? (veh.costo_total||0) // Para consigna, costo_total = gastos con markup
+    : Math.max(0,(veh.costo_total||0)-(veh.precio_toma||0));
 
   // Mostrar info del vehículo
   const infoEl=document.getElementById('wf-veh-info');
@@ -1390,18 +1524,25 @@ function wzPreloadVehiculo(){
     const gastosEl=document.getElementById('wf-veh-gastos');
     const tomaEl=document.getElementById('wf-veh-toma');
     if(tipoEl)tipoEl.textContent=veh.tipo||'—';
-    if(gastosEl)gastosEl.textContent=gastos>0?fmtARS(gastos):'Sin gastos registrados';
-    if(tomaEl)tomaEl.textContent=veh.precio_toma>0?fmtARS(veh.precio_toma)+'(precio que quiere el dueño)':'No definido';
+    if(gastosEl){
+      gastosEl.textContent=gastos>0
+        ?fmtARS(gastos)+(esConsigna?' (c/markup)':'')
+        :'Sin gastos registrados';
+      gastosEl.style.color=gastos>0?'var(--warn)':'var(--t3)';
+    }
+    if(tomaEl)tomaEl.textContent=veh.precio_toma>0
+      ?fmtARS(veh.precio_toma)+' (precio del dueño)'
+      :'No definido';
   }
 
-  // Mostrar/ocultar panel de comisión según tipo
+  // Mostrar/ocultar panel de comisión
   const comWrap=document.getElementById('wf-comision-wrap');
   if(comWrap) comWrap.style.display=esConsigna?'':'none';
 
   // Precio sugerido
   let sugerido=0,hintTxt='';
   if(esConsigna){
-    sugerido=veh.precio_tabla>0?veh.precio_tabla:veh.precio_toma||0;
+    sugerido=veh.precio_tabla>0?veh.precio_tabla:(veh.precio_toma||0);
     hintTxt=`Precio objetivo del dueño: ${fmtARS(veh.precio_toma||0)}`;
   } else if(veh.precio_tabla>0){
     sugerido=veh.precio_tabla+gastos;
@@ -1416,6 +1557,7 @@ function wzPreloadVehiculo(){
     if(hint){hint.textContent=`💡 ${hintTxt} — podés cambiarlo`;hint.style.color='var(--ok)';}
   }
   wzCalcGanancia();
+  payAutoFillFromImporte(); // cascada: auto-llenar el pago con el precio sugerido
 }
 function wzCalcGanancia(){
   const precio=moneyVal('wf-precio');
@@ -1460,7 +1602,7 @@ function wzCalcTotal(){
 function payMedioChanged(){
   const medio=document.getElementById('ps-medio')?.value||'ARS';
   const isMix=medio==='MIX';
-  ['ars','usd','chq'].forEach(k=>{
+  ['ars','usd','chq','auto'].forEach(k=>{
     const el=document.getElementById('pbs-'+k);
     if(el) el.style.display=(!isMix&&medio===k.toUpperCase())?'':'none';
   });
@@ -1480,13 +1622,16 @@ function payAutoFillFromImporte(){
   const medio=document.getElementById('ps-medio')?.value||'ARS';
   if(medio==='MIX'){const t=mixGetMainTotal();if(t>0&&MIX_ROWS.length>0)mixSetRowAmount(0,t);calcMixTotal();return;}
   if(medio==='CHQ'){calcPayTotal();return;}
-  const imp=moneyVal('wf-importe')||moneyVal('wf-total')||moneyVal('wf-neto')||0;
+  const imp=moneyVal('wf-precio')||moneyVal('wf-importe')||moneyVal('wf-total')||moneyVal('wf-neto')||0;
   if(!imp){calcPayTotal();return;}
   if(medio==='ARS'){setMoney('ps-ars',imp);payValidateARS();}
   else if(medio==='USD'){
     const tc=parseFloat(document.getElementById('ps-usd-tc')?.value)||SALDOS.tcBlue||CONFIG?.tc_blue||1450;
     if(tc>0){const usdEl=document.getElementById('ps-usd-monto');if(usdEl)usdEl.value=(imp/tc).toFixed(2);setMoney('ps-usd-ars',imp);}
     payValidateUSD();
+  } else if(medio==='AUTO'){
+    // Para AUTO: auto-completar el valor del vehículo entregado con el resto del total
+    setMoney('ps-auto-val',imp);
   }
   calcPayTotal();
 }
@@ -1495,7 +1640,9 @@ function payAutoFillFromImporte(){
 let MIX_ROWS=[]; // [{medio:'ARS'|'USD'|'CHQ'}]
 let PAY_MODE='egreso'; // 'egreso' o 'ingreso' — controla comportamiento del bloque de pago
 
-function mixGetMainTotal(){return moneyVal('wf-importe')||moneyVal('wf-total')||moneyVal('wf-neto')||0;}
+function mixGetMainTotal(){
+  return moneyVal('wf-precio')||moneyVal('wf-importe')||moneyVal('wf-total')||moneyVal('wf-neto')||0;
+}
 
 function mixRenderAll(){
   const c=document.getElementById('mix-rows-container');if(!c)return;
@@ -1518,7 +1665,7 @@ function mixRenderAll(){
   // PASO 2: renderizar con layout en 2 líneas (selector arriba, inputs abajo)
   c.innerHTML=MIX_ROWS.map((row,i)=>{
     // Línea 1: selector de método + disponible + botón eliminar
-    const avail=row.medio==='ARS'?`Disp: ${fmtARS(sARS)}`:row.medio==='USD'?`Disp: ${sUSD.toFixed(2)} USD`:`Disp: ${fmtARS(sChq)}`;
+    const avail=row.medio==='ARS'?`Disp: ${fmtARS(sARS)}`:row.medio==='USD'?`Disp: ${sUSD.toFixed(2)} USD`:row.medio==='AUTO'?'Auto a entregar':`Disp: ${fmtARS(sChq)}`;
     const delBtn=i>0?`<button class="btn-ico danger mix-del" onclick="mixRemoveRow(${i})" title="Quitar"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></button>`:'';
     // Línea 2: inputs según método (ancho completo)
     let bodyHtml='';
@@ -1553,6 +1700,17 @@ function mixRenderAll(){
       } else {
         bodyHtml=`<div id="mix-chq-list-${i}" class="pay-chq-list"><div class="pay-chq-loading">Cargando...</div></div>`;
       }
+    } else if(row.medio==='AUTO'){
+      bodyHtml=`<div style="width:100%">
+        <div style="display:flex;gap:6px;margin-bottom:4px">
+          <select class="field" id="mix-auto-sel-${i}" onchange="mixAutoSelChanged(${i})" style="flex:1">
+            <option value="">Cargando autos...</option>
+          </select>
+          <button type="button" class="btn-secondary" onclick="abrirRegistroAutoEntrega('mix',${i})" title="Nuevo auto" style="flex:0 0 auto;padding:0 12px;font-size:18px">+</button>
+        </div>
+        <input class="field money" id="mix-auto-val-${i}" placeholder="$ 0 (valor acordado)" style="width:100%" oninput="mixAmountChanged(${i})">
+        <div id="mix-auto-costo-${i}" class="field-hint"></div>
+      </div>`;
     }
     return `<div class="mix-row" id="mix-row-${i}">
       <div class="mix-row-header">
@@ -1560,6 +1718,7 @@ function mixRenderAll(){
           <option value="ARS" ${row.medio==='ARS'?'selected':''}>💵 Pesos ARS</option>
           <option value="USD" ${row.medio==='USD'?'selected':''}>💰 Dólares</option>
           <option value="CHQ" ${row.medio==='CHQ'?'selected':''}>📋 Cheque</option>
+          <option value="AUTO" ${row.medio==='AUTO'?'selected':''}>🚗 Auto (parte de pago)</option>
         </select>
         <span class="mix-avail">${avail}</span>
         ${delBtn}
@@ -1569,7 +1728,7 @@ function mixRenderAll(){
   }).join('');
 
   // Cargar cheques para filas CHQ
-  MIX_ROWS.forEach((row,i)=>{if(row.medio==='CHQ')mixLoadCheques(i);});
+  MIX_ROWS.forEach((row,i)=>{if(row.medio==='CHQ')mixLoadCheques(i);if(row.medio==='AUTO')mixLoadAutoRow(i);});
 
   // PASO 3: restaurar los montos guardados
   MIX_ROWS.forEach((row,i)=>{
@@ -1663,6 +1822,7 @@ function mixGetRowARS(idx){
     if(PAY_MODE==='ingreso') return moneyVal('mix-chq-imp-'+idx);
     let t=0;document.querySelectorAll('#mix-chq-list-'+idx+' input[type=checkbox]:checked').forEach(cb=>{t+=parseFloat(cb.dataset.importe)||0;});return t;
   }
+  if(m==='AUTO') return moneyVal('mix-auto-val-'+idx);
   return 0;
 }
 
@@ -1675,9 +1835,28 @@ function mixSetRowAmount(idx,amount){
     if(usdEl&&tc>0)usdEl.value=(amount/tc).toFixed(2);
     setMoney('mix-usd-ars-'+idx,amount);
   }
+  else if(m==='AUTO'){setMoney('mix-auto-val-'+idx,amount);}
   // CHQ: no se puede auto-setear, el usuario elige cheques
 }
 
+function mixLoadAutoRow(idx){
+  const sel=document.getElementById('mix-auto-sel-'+idx);if(!sel)return;
+  google.script.run.withSuccessHandler(todos=>{
+    sel.innerHTML='<option value="">— Seleccioná auto —</option>'+todos.map(v=>`<option value="${v.id}" data-costo="${v.costo_total}">${v.label}</option>`).join('');
+  }).getTodosVehiculos();
+}
+function mixAutoSelChanged(idx){
+  const sel=document.getElementById('mix-auto-sel-'+idx);
+  const hint=document.getElementById('mix-auto-costo-'+idx);
+  if(!sel||!hint)return;
+  const costo=parseFloat(sel.options[sel.selectedIndex]?.getAttribute('data-costo'))||0;
+  hint.textContent=costo>0?`Costo registrado: ${fmtARS(costo)}`:'';
+  calcMixTotal();
+}
+function mixAutoGetData(idx){
+  const sel=document.getElementById('mix-auto-sel-'+idx);
+  return{id:sel?.value||null,valor:moneyVal('mix-auto-val-'+idx),nombre:sel?.options[sel?.selectedIndex]?.text||''};
+}
 function mixLoadCheques(idx){
   const list=document.getElementById('mix-chq-list-'+idx);if(!list)return;
   google.script.run.withSuccessHandler(cheques=>{
@@ -1735,21 +1914,24 @@ function payUpdateChequeSubtotal(){
   const sub=document.getElementById('ps-chq-subtotal'); if(sub)sub.style.display=total>0?'':'none';
 }
 function calcPayTotal(){
-  const ars=moneyVal('ps-ars');
-  const usdARS=moneyVal('ps-usd-ars');
-  let chqTotal=0;
-  document.querySelectorAll('input[name="ps-chq"]:checked').forEach(cb=>{chqTotal+=parseFloat(cb.dataset.importe)||0;});
-  payUpdateChequeSubtotal();
-  const total=ars+usdARS+chqTotal;
-  const el=document.getElementById('ps-total'); if(el)el.textContent=fmtARS(total);
-  // Comparar contra el monto a pagar
-  const imp=moneyVal('wf-importe')||moneyVal('wf-total')||moneyVal('wf-neto')||0;
-  const difMsg=document.getElementById('ps-dif-msg'); if(!difMsg)return;
-  if(imp>0&&total>0){
-    const dif=imp-total;
-    if(Math.abs(dif)<1){difMsg.style.display='';difMsg.style.color='var(--ok)';difMsg.textContent='✓ Cubre el monto';}
-    else if(dif>0){difMsg.style.display='';difMsg.style.color='var(--warn)';difMsg.textContent=`Faltan ${fmtARS(dif)}`;}
-    else{difMsg.style.display='';difMsg.style.color='var(--t3)';difMsg.textContent=`Excede por ${fmtARS(-dif)}`;}
+  const medio=document.getElementById('ps-medio')?.value||'ARS';
+  let total=0;
+  if(medio==='MIX'){MIX_ROWS.forEach((_,i)=>{total+=mixGetRowARS(i);});}
+  else if(medio==='ARS')total=moneyVal('ps-ars');
+  else if(medio==='USD')total=moneyVal('ps-usd-ars');
+  else if(medio==='AUTO')total=moneyVal('ps-auto-val');
+  else if(medio==='CHQ'){
+    // CHQ ingreso: usa ps-chq-importe
+    const newChqImp=moneyVal('ps-chq-importe');
+    if(newChqImp>0)total=newChqImp;
+    else{let t=0;document.querySelectorAll('input[name="ps-chq"]:checked').forEach(cb=>{t+=parseFloat(cb.dataset.importe)||0;});payUpdateChequeSubtotal();total=t;}
+  }
+  const el=document.getElementById('ps-total');if(el)el.textContent=fmtARS(total);
+  const main=mixGetMainTotal(),difMsg=document.getElementById('ps-dif-msg');if(!difMsg)return;
+  if(main>0&&total>0){const d=main-total;
+    if(Math.abs(d)<1){difMsg.style.display='';difMsg.style.color='var(--ok)';difMsg.textContent='✓ Cubre el monto';}
+    else if(d>0){difMsg.style.display='';difMsg.style.color='var(--warn)';difMsg.textContent=`Faltan ${fmtARS(d)}`;}
+    else{difMsg.style.display='';difMsg.style.color='var(--t3)';difMsg.textContent=`Excede por ${fmtARS(-d)}`;}
   }else difMsg.style.display='none';
 }
 // Compatibilidad con código viejo
@@ -1768,6 +1950,10 @@ function _getPaymentSources(){
         const usd=parseFloat(document.getElementById('mix-usd-monto-'+i)?.value)||0;
         const tc=parseFloat(document.getElementById('mix-usd-tc-'+i)?.value)||0;
         if(usd>0&&tc>0)mix.push({medio:'USD',usd,tc,ars:Math.round(usd*tc)});
+      }
+      else if(row.medio==='AUTO'){
+        const data=mixAutoGetData(i);
+        if(data.valor>0)mix.push({medio:'AUTO',valor:data.valor,id:data.id,nombre:data.nombre,ars:data.valor});
       }
       else if(row.medio==='CHQ'){
         if(PAY_MODE==='ingreso'){
@@ -1793,12 +1979,17 @@ function _getPaymentSources(){
   const ps={};
   if(medio==='ARS'){const ars=moneyVal('ps-ars');if(ars>0)ps.ars=ars;}
   else if(medio==='USD'){const usd=parseFloat(document.getElementById('ps-usd-monto')?.value)||0;const tc=parseFloat(document.getElementById('ps-usd-tc')?.value)||0;if(usd>0&&tc>0)ps.usd={monto_usd:usd,tc};}
+  else if(medio==='AUTO'){
+    const autoId=document.getElementById('ps-auto-sel')?.value||null;
+    const autoVal=moneyVal('ps-auto-val');
+    const autoNombre=document.getElementById('ps-auto-sel')?.options[document.getElementById('ps-auto-sel')?.selectedIndex]?.text||'';
+    if(autoVal>0)ps.auto={id:autoId,valor:autoVal,nombre:autoNombre};
+  }
   else if(medio==='CHQ'){
     if(PAY_MODE==='ingreso'){
       const imp=moneyVal('ps-chq-importe');
       if(imp>0)ps.chq_nuevo={banco:document.getElementById('ps-chq-banco')?.value||'',numero:document.getElementById('ps-chq-num')?.value||'',vto:document.getElementById('ps-chq-vto')?.value||'',importe:imp};
     }
-    // Egreso CHQ: manejado por loadCheques, no aquí
   }
   return Object.keys(ps).length?ps:null;
 }
@@ -1817,40 +2008,46 @@ function wzGuardar(){
       const precio=moneyVal('wf-precio'); if(!precio){toast('Ingresá el precio de venta','err');return;}
       const comprador=document.getElementById('wf-comprador').value;
       if(!comprador){toast('Ingresá el comprador','err');return;}
-      // Parte de pago con auto (punto 3)
-      const usaVehPago=document.getElementById('wf-veh-toggle')?.checked;
-      const idAutoPartePago=usaVehPago?document.getElementById('wf-auto-parte')?.value:'';
-      const vehiculo_entrega=usaVehPago?moneyVal('wf-veh'):0;
-      if(usaVehPago&&!idAutoPartePago){toast('Seleccioná el auto de parte de pago','err');return;}
-      const vehParteLabel=usaVehPago?document.getElementById('wf-auto-parte').options[document.getElementById('wf-auto-parte').selectedIndex]?.text:'';
+
+      // ── CAPTURAR TODOS LOS VALORES DEL FORMULARIO ANTES de showConfirm ──
+      // showConfirm llama a cerrarModal() ANTES del callback, borrando el DOM.
+      // Todo lo que necesitemos dentro del callback DEBE capturarse aquí.
+      const vehLabel=document.getElementById('wf-vehiculo').options[document.getElementById('wf-vehiculo').selectedIndex]?.text||idVeh;
+      const tc_dia=parseFloat(document.getElementById('wf-tc-dia')?.value)||0;
+      const vendedorVal=document.getElementById('wf-vendedor')?.value||'';
+      const entidadVal=document.getElementById('wf-entidad')?.value||'AGA';
+      const veh=VEH_MAP[idVeh]||{};
+      const esConsigna=veh.tipo==='Consigna';
+      const comisionPct=esConsigna?(parseFloat(document.getElementById('wf-comision-pct')?.value)||5):null;
+      const ps=_getPaymentSources(); // leer payment sources AHORA (DOM existe)
+      let vehiculo_entrega=0,idAutoPartePago=null;
+      if(ps?.auto){vehiculo_entrega=ps.auto.valor||0;idAutoPartePago=ps.auto.id||null;}
+      else if(ps?.mix){const comp=ps.mix.find(m=>m.medio==='AUTO');if(comp){vehiculo_entrega=comp.valor||0;idAutoPartePago=comp.id||null;}}
+      const detalleVenta=`Venta auto — ${vehLabel}`;
+
       if(!showConfirm(`¿Confirmar venta?`,
-        `Vehículo: ${document.getElementById('wf-vehiculo').options[document.getElementById('wf-vehiculo').selectedIndex]?.text}<br>Comprador: <strong>${comprador}</strong><br>Precio: <strong>${fmtARS(precio)}</strong>${usaVehPago?`<br>Parte de pago: ${vehParteLabel} · ${fmtARS(vehiculo_entrega)}`:''}`,
+        `Vehículo: <strong>${vehLabel}</strong><br>Comprador: <strong>${comprador}</strong><br>Precio: <strong>${fmtARS(precio)}</strong>${vehiculo_entrega?`<br>Parte de pago (auto): ${fmtARS(vehiculo_entrega)}`:''}`,
         'Confirmar venta',()=>{
-          const tc_dia=parseFloat(document.getElementById('wf-tc-dia')?.value)||0;
-          const veh=VEH_MAP[idVeh]||{};
-          const esConsigna=veh.tipo==='Consigna';
-          const comisionPct=esConsigna?(parseFloat(document.getElementById('wf-comision-pct')?.value)||5):null;
-          const ps=_getPaymentSources();
+          // ── CALLBACK: ya no hay DOM — usar SÓLO las variables capturadas arriba ──
           const d2={...data,id_vehiculo:idVeh,precio_venta:precio,comprador,
-            vendedor:document.getElementById('wf-vendedor').value,
+            vendedor:vendedorVal,
             efectivo:ps?.ars||ps?.mix?.find(m=>m.medio==='ARS')?.ars||0,
-            vehiculo_entrega,
-            id_auto_parte_pago:idAutoPartePago||null,
+            vehiculo_entrega,id_auto_parte_pago:idAutoPartePago,
             financiacion:0,tc_dia,debe:precio,
-            comision_pct:comisionPct,
-            es_ingreso:true,
-            detalle:`Venta auto — ${document.getElementById('wf-vehiculo').options[document.getElementById('wf-vehiculo').selectedIndex]?.text}`,
-            concepto:'Venta Auto'};
+            comision_pct:comisionPct,es_ingreso:true,
+            detalle:detalleVenta,concepto:'Venta Auto',entidad:entidadVal};
           if(ps)d2.payment_sources=ps;
-          d2.entidad=document.getElementById('wf-entidad')?.value||ENTIDAD_ACTUAL;
-          const btn=document.getElementById('wz-guardar'); btn.disabled=true; btn.textContent='Guardando...';
-          google.script.run.withSuccessHandler(r=>{
-            if(r.ok){cerrarModal();toast(`Venta registrada · Ganancia: ${fmtARS(r.ganancia||0)}`,'ok');loadMovimientos();loadBalances();dashLoaded=false;loadCajaTab(CAJA_TAB);loadInventario(INV_FILTRO);}
-            else{toast(r.error||'Error','err');btn.disabled=false;btn.textContent='Guardar movimiento';}
-          }).withFailureHandler(()=>{toast('Error','err');btn.disabled=false;btn.textContent='Guardar movimiento';})
-          .saveMovimientoCajaCompleto(d2);
+          google.script.run
+            .withSuccessHandler(r=>{
+              if(r.ok){
+                toast(`Venta registrada · Ganancia: ${fmtARS(r.ganancia||0)}`,'ok');
+                loadMovimientos();loadBalances();dashLoaded=false;loadCajaTab(CAJA_TAB);loadInventario(INV_FILTRO);
+              }else toast(r.error||'Error al guardar la venta','err');
+            })
+            .withFailureHandler(e=>{toast('Error de conexión: '+(e?.message||''),'err');})
+            .saveMovimientoCajaCompleto(d2);
         },'warn')) return;
-      return; // showConfirm es async, el guardado se hace en el callback
+      return;
     }
     else if(WZ.concepto==='gasto_auto'){
       const idVeh=document.getElementById('wf-vehiculo').value; if(!idVeh){toast('Seleccioná un vehículo','err');return;}
@@ -1913,7 +2110,7 @@ function wzGuardar(){
       if(!anio) return fieldError('wf-anio','Ingresá el año');
       const tipo=document.getElementById('wf-tipo-veh')?.value||'Usado';
       const precioTabla=moneyVal('wf-precio-tabla')||0;
-      const entidadSel=document.getElementById('wf-entidad')?.value||ENTIDAD_ACTUAL;
+      const entidadSel=document.getElementById('wf-entidad')?.value||'AGA';
       const esMartin=entidadSel==='Martin'; // automático por entidad seleccionada
       const exDueno=esMartin?'Martin':document.getElementById('wf-exdueno')?.value||'';
       const descAuto=`Compra ${marca} ${modelo} ${anio} (${dominio})${esMartin?' [Martín]':''}`;
@@ -1947,7 +2144,7 @@ function wzGuardar(){
     const payS = _getPaymentSources();
     if(payS) data.payment_sources = payS;
 
-    const btn=document.getElementById('wz-guardar'); btn.disabled=true; btn.textContent='Guardando...';
+    const btn=document.getElementById('wz-guardar'); if(btn){btn.disabled=true; btn.textContent='Guardando...';}
 
     // compra_auto: primero crear el vehículo, luego el movimiento de caja
     if(data._veh_data){
@@ -1987,8 +2184,13 @@ function wzGuardar(){
           loadMovimientos();loadBalances();dashLoaded=false;
           // Refrescar el tab activo (una sola llamada para evitar race condition)
           loadCajaTab(CAJA_TAB);
-          // Tabs secundarios: cheques si hubo cheques
-          if(WZ.concepto==='cobro_cheque'||WZ.concepto==='pago_cheque'||(payS?.cheques||payS?.mix?.some(m=>m.medio==='CHQ'))) loadCheques('');
+          // Refrescar cheques si hubo cheque en el movimiento (egreso O ingreso nuevo)
+          if(WZ.concepto==='cobro_cheque'||WZ.concepto==='pago_cheque'||
+             payS?.cheques||payS?.chq_nuevo||
+             payS?.mix?.some(m=>m.medio==='CHQ')) {
+            loadCheques('');
+            toast('Movimiento guardado · Cheque registrado en cartera','ok');
+          }
         }else{toast(r.error||'Error al guardar','err');btn.disabled=false;btn.textContent='Guardar movimiento';}
       })
       .withFailureHandler(e=>{toast('Error','err');btn.disabled=false;btn.textContent='Guardar movimiento';})
